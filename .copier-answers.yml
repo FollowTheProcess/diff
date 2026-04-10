@@ -1,0 +1,14 @@
+# Changes here will be overwritten by Copier
+_commit: v0.54.3
+_src_path: gh:FollowTheProcess/go-template
+author_name: Tom Fleet
+dependency_bot: renovate
+description: A pure Go text diff library
+github_url: https://github.com/FollowTheProcess/diff
+github_username: FollowTheProcess
+license: MIT
+linter: golangci-lint
+module_path: go.followtheprocess.codes/diff
+project_name: diff
+project_slug: diff
+project_type: library
