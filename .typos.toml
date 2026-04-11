@@ -4,4 +4,8 @@ byt = "byt"           # Useful name as byte is a keyword in go
 decorder = "decorder" # Name of a Go linter
 
 [files]
-extend-exclude = ["go.mod", "go.sum"]
+extend-exclude = [
+    "go.mod",
+    "go.sum",
+    "**/testdata/**"
+]

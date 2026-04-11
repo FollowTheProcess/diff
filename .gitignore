@@ -37,6 +37,7 @@
 !docs/img/*.webp
 !README.md
 !LICENSE
+!NOTICE
 
 # Docker
 !Dockerfile
