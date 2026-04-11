@@ -78,7 +78,7 @@ func CharDiff(removed, added []byte) InlineChange {
 		return fallback(removed, added)
 	}
 
-	segs := lcsSegments(oldRunes, newRunes)
+	segs := lcsSegments(oldRunes, newRunes, len(removedCore), len(addedCore))
 
 	removedSegs := reattachNL(segs.removed, removedNL)
 	addedSegs := reattachNL(segs.added, addedNL)
@@ -154,7 +154,9 @@ type op struct {
 
 // lcsSegments builds the LCS table and backtracks to produce Equal/Delete/Insert
 // edit operations, then merges consecutive same-kind ops into Segment runs.
-func lcsSegments(old, newText []rune) sides {
+// rCap and aCap are the byte lengths of the removed and added inputs (without
+// their trailing newlines) and are used to pre-allocate segment backing buffers.
+func lcsSegments(old, newText []rune, rCap, aCap int) sides {
 	m, n := len(old), len(newText)
 
 	// Build LCS DP table using a flat slice to avoid m+1 separate allocations.
@@ -195,7 +197,7 @@ func lcsSegments(old, newText []rune) sides {
 		ops[l], ops[r] = ops[r], ops[l]
 	}
 
-	return mergeSegments(ops)
+	return mergeSegments(ops, rCap, aCap)
 }
 
 // segmentInitCap is the initial capacity for segment slices in mergeSegments.
@@ -204,9 +206,17 @@ func lcsSegments(old, newText []rune) sides {
 const segmentInitCap = 8
 
 // mergeSegments merges consecutive same-kind ops into Segment runs.
-func mergeSegments(ops []op) sides {
+// rCap and aCap are the byte capacities for the removed and added backing
+// buffers; they must equal the byte lengths of the respective core inputs so
+// that the buffers never reallocate, keeping all segment Text subslices valid.
+func mergeSegments(ops []op, rCap, aCap int) sides {
 	removedSegs := make([]Segment, 0, segmentInitCap)
 	addedSegs := make([]Segment, 0, segmentInitCap)
+
+	// Pre-allocated backing buffers. Sized to the exact input byte lengths so
+	// no reallocation occurs and existing Text subslices are never invalidated.
+	removedBacking := make([]byte, 0, rCap)
+	addedBacking := make([]byte, 0, aCap)
 
 	var buf [utf8.UTFMax]byte
 	for _, o := range ops {
@@ -215,29 +225,47 @@ func mergeSegments(ops []op) sides {
 
 		switch o.kind {
 		case 'e':
+			removedBacking = append(removedBacking, r...)
+
 			if len(removedSegs) > 0 && !removedSegs[len(removedSegs)-1].Changed {
-				removedSegs[len(removedSegs)-1].Text = append(removedSegs[len(removedSegs)-1].Text, r...)
+				last := &removedSegs[len(removedSegs)-1]
+				last.Text = last.Text[:len(last.Text)+nb]
 			} else {
-				removedSegs = append(removedSegs, Segment{Text: bytes.Clone(r), Changed: false})
+				removedSegs = append(
+					removedSegs,
+					Segment{Text: removedBacking[len(removedBacking)-nb:], Changed: false},
+				)
 			}
 
+			addedBacking = append(addedBacking, r...)
+
 			if len(addedSegs) > 0 && !addedSegs[len(addedSegs)-1].Changed {
-				addedSegs[len(addedSegs)-1].Text = append(addedSegs[len(addedSegs)-1].Text, r...)
+				last := &addedSegs[len(addedSegs)-1]
+				last.Text = last.Text[:len(last.Text)+nb]
 			} else {
-				addedSegs = append(addedSegs, Segment{Text: bytes.Clone(r), Changed: false})
+				addedSegs = append(addedSegs, Segment{Text: addedBacking[len(addedBacking)-nb:], Changed: false})
 			}
+
 		case 'd':
+			removedBacking = append(removedBacking, r...)
+
 			if len(removedSegs) > 0 && removedSegs[len(removedSegs)-1].Changed {
-				removedSegs[len(removedSegs)-1].Text = append(removedSegs[len(removedSegs)-1].Text, r...)
+				last := &removedSegs[len(removedSegs)-1]
+				last.Text = last.Text[:len(last.Text)+nb]
 			} else {
-				removedSegs = append(removedSegs, Segment{Text: bytes.Clone(r), Changed: true})
+				removedSegs = append(removedSegs, Segment{Text: removedBacking[len(removedBacking)-nb:], Changed: true})
 			}
+
 		case 'i':
+			addedBacking = append(addedBacking, r...)
+
 			if len(addedSegs) > 0 && addedSegs[len(addedSegs)-1].Changed {
-				addedSegs[len(addedSegs)-1].Text = append(addedSegs[len(addedSegs)-1].Text, r...)
+				last := &addedSegs[len(addedSegs)-1]
+				last.Text = last.Text[:len(last.Text)+nb]
 			} else {
-				addedSegs = append(addedSegs, Segment{Text: bytes.Clone(r), Changed: true})
+				addedSegs = append(addedSegs, Segment{Text: addedBacking[len(addedBacking)-nb:], Changed: true})
 			}
+
 		default:
 			// op.kind is always 'e', 'd', or 'i' — lcsSegments is the only producer.
 		}

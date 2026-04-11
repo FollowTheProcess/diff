@@ -20,6 +20,11 @@ const (
 	styleAddedHighlight   = hue.Black | hue.Bold | hue.GreenBackground
 )
 
+var (
+	prefixRemoved = []byte("- ")
+	prefixAdded   = []byte("+ ")
+)
+
 // Render formats a []diff.Line as a colourised byte slice suitable for terminal output.
 // Returns nil if lines is nil or empty.
 //
@@ -125,7 +130,7 @@ func renderInlinePairs(buf []byte, removed, added []diff.Line) []byte {
 	for k := range removed {
 		ic := diff.CharDiff(removed[k].Content, added[k].Content)
 
-		buf = styleRemovedLine.AppendText(buf, []byte("- "))
+		buf = styleRemovedLine.AppendText(buf, prefixRemoved)
 
 		for _, seg := range ic.Removed {
 			if seg.Changed {
@@ -135,7 +140,7 @@ func renderInlinePairs(buf []byte, removed, added []diff.Line) []byte {
 			}
 		}
 
-		buf = styleAddedLine.AppendText(buf, []byte("+ "))
+		buf = styleAddedLine.AppendText(buf, prefixAdded)
 
 		for _, seg := range ic.Added {
 			if seg.Changed {
@@ -152,12 +157,12 @@ func renderInlinePairs(buf []byte, removed, added []diff.Line) []byte {
 // renderWholeLine renders removed/added lines with whole-line colour (no inline diff).
 func renderWholeLine(buf []byte, removed, added []diff.Line) []byte {
 	for _, r := range removed {
-		buf = styleRemovedLine.AppendText(buf, []byte("- "))
+		buf = styleRemovedLine.AppendText(buf, prefixRemoved)
 		buf = styleRemovedLine.AppendText(buf, r.Content)
 	}
 
 	for _, a := range added {
-		buf = styleAddedLine.AppendText(buf, []byte("+ "))
+		buf = styleAddedLine.AppendText(buf, prefixAdded)
 		buf = styleAddedLine.AppendText(buf, a.Content)
 	}
 

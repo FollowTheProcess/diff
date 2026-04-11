@@ -16,7 +16,7 @@ import (
 	"bytes"
 	"fmt"
 	"sort"
-	"strings"
+	"unsafe"
 )
 
 // LineKind identifies the role of a line in a diff output.
@@ -51,7 +51,8 @@ func (k LineKind) String() string {
 // Content holds the line text without the leading diff prefix ("- "/"+ "/"  ").
 // For KindHeader lines, Content holds the full raw line including its newline.
 // For all other kinds, Content holds the line text as it appeared in the source,
-// including its trailing newline if present.
+// including its trailing newline if present. Content aliases the original input
+// passed to [Lines] or [Diff]; callers must not modify it.
 type Line struct {
 	Content []byte
 	Kind    LineKind
@@ -166,19 +167,19 @@ func computeLines(oldName string, old []byte, newName string, newText []byte) []
 		start, end := expandMatch(m, done, x, y)
 
 		for _, s := range x[done.x:start.x] {
-			ctext = append(ctext, Line{Kind: KindRemoved, Content: []byte(s)})
+			ctext = append(ctext, Line{Kind: KindRemoved, Content: s})
 			count.x++
 		}
 
 		for _, s := range y[done.y:start.y] {
-			ctext = append(ctext, Line{Kind: KindAdded, Content: []byte(s)})
+			ctext = append(ctext, Line{Kind: KindAdded, Content: s})
 			count.y++
 		}
 
 		if (end.x < len(x) || end.y < len(y)) &&
 			(end.x-start.x < contextLines || (len(ctext) > 0 && end.x-start.x < 2*contextLines)) {
 			for _, s := range x[start.x:end.x] {
-				ctext = append(ctext, Line{Kind: KindContext, Content: []byte(s)})
+				ctext = append(ctext, Line{Kind: KindContext, Content: s})
 				count.x++
 				count.y++
 			}
@@ -192,7 +193,7 @@ func computeLines(oldName string, old []byte, newName string, newText []byte) []
 			n := min(end.x-start.x, contextLines)
 
 			for _, s := range x[start.x : start.x+n] {
-				ctext = append(ctext, Line{Kind: KindContext, Content: []byte(s)})
+				ctext = append(ctext, Line{Kind: KindContext, Content: s})
 				count.x++
 				count.y++
 			}
@@ -213,7 +214,7 @@ func computeLines(oldName string, old []byte, newName string, newText []byte) []
 
 		chunk = pair{end.x - contextLines, end.y - contextLines}
 		for _, s := range x[chunk.x:end.x] {
-			ctext = append(ctext, Line{Kind: KindContext, Content: []byte(s)})
+			ctext = append(ctext, Line{Kind: KindContext, Content: s})
 			count.x++
 			count.y++
 		}
@@ -226,15 +227,15 @@ func computeLines(oldName string, old []byte, newName string, newText []byte) []
 
 // expandMatch expands a match region backward to start and forward to end
 // while adjacent lines in x and y also match.
-func expandMatch(m, done pair, x, y []string) (start, end pair) {
+func expandMatch(m, done pair, x, y [][]byte) (start, end pair) {
 	start = m
-	for start.x > done.x && start.y > done.y && x[start.x-1] == y[start.y-1] {
+	for start.x > done.x && start.y > done.y && bytes.Equal(x[start.x-1], y[start.y-1]) {
 		start.x--
 		start.y--
 	}
 
 	end = m
-	for end.x < len(x) && end.y < len(y) && x[end.x] == y[end.y] {
+	for end.x < len(x) && end.y < len(y) && bytes.Equal(x[end.x], y[end.y]) {
 		end.x++
 		end.y++
 	}
@@ -259,18 +260,32 @@ func chunkHeader(chunk, count pair) Line {
 	}
 }
 
-// splitLines returns the lines in x, including newlines.
-// If the file does not end in a newline, one is supplied
-// along with a warning about the missing newline.
-func splitLines(x []byte) []string {
-	l := strings.SplitAfter(string(x), "\n")
-	if l[len(l)-1] == "" {
-		l = l[:len(l)-1]
-	} else {
-		l[len(l)-1] += "\n\\ No newline at end of file\n"
+// splitLines returns the lines in x as subslices of x, including newlines.
+// If the file does not end in a newline, a new slice is allocated for the final
+// line with the standard "no newline" warning appended.
+func splitLines(x []byte) [][]byte {
+	var lines [][]byte
+
+	for len(x) > 0 {
+		i := bytes.IndexByte(x, '\n')
+		if i < 0 {
+			// No trailing newline — must allocate to append the warning suffix.
+			const suffix = "\n\\ No newline at end of file\n"
+
+			line := make([]byte, len(x)+len(suffix))
+			copy(line, x)
+			copy(line[len(x):], suffix)
+
+			lines = append(lines, line)
+
+			break
+		}
+
+		lines = append(lines, x[:i+1])
+		x = x[i+1:]
 	}
 
-	return l
+	return lines
 }
 
 // tgsYStep is the per-occurrence decrement applied to y-side entries in the
@@ -292,31 +307,39 @@ const tgsSentinels = 2
 //
 // Algorithm: Thomas G. Szymanski, "A Special Case of the Maximal Common
 // Subsequence Problem," Princeton TR #170 (January 1975).
-func tgs(x, y []string) []pair {
+func tgs(x, y [][]byte) []pair {
+	// unsafe.String converts a []byte to string without allocating. This is safe
+	// because the strings are only stored in m, which is local to this function.
+	// The backing []byte data (subslices of the original inputs) outlives this call.
 	m := make(map[string]int)
+
 	for _, s := range x {
-		if c := m[s]; c > -2 {
-			m[s] = c - 1
+		k := unsafe.String(unsafe.SliceData(s), len(s))
+		if c := m[k]; c > -2 {
+			m[k] = c - 1
 		}
 	}
 
 	for _, s := range y {
-		if c := m[s]; c > -tgsYMany {
-			m[s] = c - tgsYStep
+		k := unsafe.String(unsafe.SliceData(s), len(s))
+		if c := m[k]; c > -tgsYMany {
+			m[k] = c - tgsYStep
 		}
 	}
 
 	var xi, yi, inv []int
 
 	for i, s := range y {
-		if m[s] == -1+-tgsYStep {
-			m[s] = len(yi)
+		k := unsafe.String(unsafe.SliceData(s), len(s))
+		if m[k] == -1+-tgsYStep {
+			m[k] = len(yi)
 			yi = append(yi, i)
 		}
 	}
 
 	for i, s := range x {
-		if j, ok := m[s]; ok && j >= 0 {
+		k := unsafe.String(unsafe.SliceData(s), len(s))
+		if j, ok := m[k]; ok && j >= 0 {
 			xi = append(xi, i)
 			inv = append(inv, j)
 		}
@@ -354,6 +377,7 @@ func tgs(x, y []string) []pair {
 		if lengths[i] == k && j[i] < lastj {
 			seq[k] = pair{xi[i], yi[j[i]]}
 			k--
+			lastj = j[i]
 		}
 	}
 
