@@ -34,7 +34,9 @@
 
 # Docs
 !docs/img/*.png
+!docs/img/*.gif
 !docs/img/*.webp
+!docs/src/*.tape
 !README.md
 !LICENSE
 !NOTICE

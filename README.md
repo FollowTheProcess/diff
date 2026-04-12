@@ -7,6 +7,8 @@
 [![CI](https://github.com/FollowTheProcess/diff/workflows/CI/badge.svg)](https://github.com/FollowTheProcess/diff/actions?query=workflow%3ACI)
 [![codecov](https://codecov.io/gh/FollowTheProcess/diff/branch/main/graph/badge.svg)](https://codecov.io/gh/FollowTheProcess/diff)
 
+![demo](https://github.com/FollowTheProcess/diff/raw/main/docs/img/demo.gif)
+
 A pure Go text diff library providing an anchored diff algorithm, character-level
 inline diff, and colourised terminal rendering. It started life as `internal/diff` in [`test`] until
 I needed it in a few places so here it is 🎉
