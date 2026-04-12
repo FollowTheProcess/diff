@@ -1,0 +1,5 @@
+This software contains code derived from the Go standard library's internal/diff package
+(https://github.com/golang/go/tree/master/src/internal/diff).
+
+Copyright 2022 The Go Authors. All rights reserved.
+Used under a BSD-style license (https://github.com/golang/go/blob/master/LICENSE).

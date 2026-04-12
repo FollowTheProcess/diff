@@ -1,0 +1,2 @@
+[1mdiff want got
+[0m
