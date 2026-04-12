@@ -33,10 +33,15 @@ type InlineChange struct {
 //     is returned as a fallback.
 //   - If either side exceeds 500 runes, a single whole-line Changed segment is
 //     returned to avoid O(mn) cost on minified or generated content.
+//   - If the similarity ratio (2*equalRunes / totalRunes) is below the threshold
+//     set by [WithSimilarityThreshold] (default 0.5), a whole-line Changed segment
+//     is returned — intraline highlighting of very different lines is noisy.
 //
 // The concatenation of segment Text fields on each side always equals the
 // original input byte-for-byte.
-func CharDiff(removed, added []byte) InlineChange {
+func CharDiff(removed, added []byte, opts ...Option) InlineChange {
+	cfg := applyOptions(opts)
+
 	// Identical inputs: short-circuit before any UTF-8 handling. This also
 	// covers identical invalid UTF-8, where fallback would wrongly return
 	// Changed:true segments.
@@ -79,6 +84,40 @@ func CharDiff(removed, added []byte) InlineChange {
 	}
 
 	segs := lcsSegments(oldRunes, newRunes, len(removedCore), len(addedCore))
+
+	// Similarity ratio gate: if the ratio of equal runes to total runes is below
+	// the threshold, intraline highlighting would be more noise than signal.
+	// Build the whole-line fallback using the stripped core slices so that
+	// reattachNL can place the trailing newline outside the Changed segment —
+	// a highlighted \n bleeds ANSI background colour onto the next terminal line.
+	totalRunes := len(oldRunes) + len(newRunes)
+	if totalRunes > 0 {
+		equalRunes := 0
+
+		for _, seg := range segs.removed {
+			if !seg.Changed {
+				equalRunes += utf8.RuneCount(seg.Text)
+			}
+		}
+
+		ratio := float64(similarityRatioScale*equalRunes) / float64(totalRunes)
+		if ratio < cfg.similarityThreshold {
+			var rSegs []Segment
+			if len(removedCore) > 0 {
+				rSegs = []Segment{{Text: bytes.Clone(removedCore), Changed: true}}
+			}
+
+			var aSegs []Segment
+			if len(addedCore) > 0 {
+				aSegs = []Segment{{Text: bytes.Clone(addedCore), Changed: true}}
+			}
+
+			return InlineChange{
+				Removed: reattachNL(rSegs, removedNL),
+				Added:   reattachNL(aSegs, addedNL),
+			}
+		}
+	}
 
 	removedSegs := reattachNL(segs.removed, removedNL)
 	addedSegs := reattachNL(segs.added, addedNL)
@@ -199,6 +238,11 @@ func lcsSegments(old, newText []rune, rCap, aCap int) sides {
 
 	return mergeSegments(ops, rCap, aCap)
 }
+
+// similarityRatioScale is the multiplier used in the similarity ratio formula:
+// ratio = 2*equalRunes / totalRunes. The factor of 2 ensures that two identical
+// lines score 1.0 (each equal rune is counted once on each side).
+const similarityRatioScale = 2
 
 // segmentInitCap is the initial capacity for segment slices in mergeSegments.
 // Most diff lines produce far fewer than 8 segments; this avoids the first

@@ -132,6 +132,10 @@ The core diff algorithm (`diff.go`) is derived from the Go standard library's
 Copyright 2022 The Go Authors. All rights reserved. Used under a
 [BSD-style license](https://github.com/golang/go/blob/master/LICENSE).
 
+Several optimisations — including common prefix/suffix trimming, the disjoint
+fast-path, and the `CharDiff` similarity ratio gate — were inspired by the
+[`similar`](https://github.com/mitsuhiko/similar) Rust crate by Armin Ronacher.
+
 ### Credits
 
 This package was created with [copier] and the [FollowTheProcess/go-template] project template.

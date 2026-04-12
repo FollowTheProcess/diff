@@ -70,12 +70,12 @@ type pair struct{ x, y int }
 //
 // The structured form is useful for custom rendering; for plain unified-diff
 // text output use [Diff].
-func Lines(oldName string, old []byte, newName string, newText []byte) []Line {
+func Lines(oldName string, old []byte, newName string, newText []byte, opts ...Option) []Line {
 	if bytes.Equal(old, newText) {
 		return nil
 	}
 
-	return computeLines(oldName, old, newName, newText)
+	return computeLines(oldName, old, newName, newText, applyOptions(opts))
 }
 
 // Diff returns an anchored unified diff of old and newText as raw bytes.
@@ -107,12 +107,13 @@ func Diff(
 	old []byte,
 	newName string,
 	newText []byte,
+	opts ...Option,
 ) []byte {
 	if bytes.Equal(old, newText) {
 		return nil
 	}
 
-	structured := computeLines(oldName, old, newName, newText)
+	structured := computeLines(oldName, old, newName, newText, applyOptions(opts))
 
 	var out bytes.Buffer
 
@@ -137,30 +138,24 @@ func Diff(
 	return out.Bytes()
 }
 
-// computeLines computes structured diff lines for old and newText (assumed non-equal).
-func computeLines(oldName string, old []byte, newName string, newText []byte) []Line {
-	x := splitLines(old)
-	y := splitLines(newText)
-
-	var result []Line
-
-	result = append(result,
-		Line{Kind: KindHeader, Content: fmt.Appendf(nil, "diff %s %s\n", oldName, newName)},
-		Line{Kind: KindHeader, Content: fmt.Appendf(nil, "--- %s\n", oldName)},
-		Line{Kind: KindHeader, Content: fmt.Appendf(nil, "+++ %s\n", newName)},
-	)
-
+// groupIntoHunks groups the unique-line match pairs returned by [tgs] into
+// context-annotated diff Lines.
+// pairs is the output of [tgs] (including sentinels). x and y are the full line
+// slices. contextLines controls how many unchanged lines are shown around changes.
+func groupIntoHunks(pairs []pair, x, y [][]byte, contextLines int) []Line {
 	var (
-		done  pair
-		chunk pair
-		count pair
-		ctext []Line
+		done   pair
+		chunk  pair
+		count  pair
+		ctext  []Line
+		result []Line
 	)
 
-	const contextLines = 3
-
-	for _, m := range tgs(x, y) {
-		if m.x < done.x {
+	for _, m := range pairs {
+		// Guard both coordinates independently: after pair offsetting a pair can
+		// advance one axis past done while the other lags, producing a negative
+		// slice range in the done.x:start.x or done.y:start.y expressions below.
+		if m.x < done.x || m.y < done.y {
 			continue
 		}
 
@@ -221,6 +216,119 @@ func computeLines(oldName string, old []byte, newName string, newText []byte) []
 
 		done = end
 	}
+
+	return result
+}
+
+// trimResult is the output of trimPrefixSuffix.
+type trimResult struct {
+	oldTrimmed [][]byte
+	newTrimmed [][]byte
+	prefix     int
+	suffix     int
+}
+
+// isDisjoint reports whether old and new share no lines in common.
+// It only performs the check when both slices have at least 512 lines;
+// below that threshold [tgs] is fast enough that the overhead is not worthwhile.
+func isDisjoint(old, newSlice [][]byte) bool {
+	if len(old) < 512 || len(newSlice) < 512 {
+		return false
+	}
+
+	// Build a set from the shorter side to minimise allocations.
+	shorter, longer := old, newSlice
+	if len(old) > len(newSlice) {
+		shorter, longer = newSlice, old
+	}
+
+	seen := make(map[string]struct{}, len(shorter))
+	for _, s := range shorter {
+		seen[unsafe.String(unsafe.SliceData(s), len(s))] = struct{}{}
+	}
+
+	for _, s := range longer {
+		if _, ok := seen[unsafe.String(unsafe.SliceData(s), len(s))]; ok {
+			return false
+		}
+	}
+
+	return true
+}
+
+// trimPrefixSuffix finds the longest common prefix and suffix of x and y and
+// returns the middle "interesting" portion together with the strip counts.
+// The trimmed slices are subslices of the originals — no allocation.
+func trimPrefixSuffix(x, y [][]byte) trimResult {
+	prefix := 0
+	for prefix < len(x) && prefix < len(y) && bytes.Equal(x[prefix], y[prefix]) {
+		prefix++
+	}
+
+	suffix := 0
+	for suffix < len(x)-prefix && suffix < len(y)-prefix &&
+		bytes.Equal(x[len(x)-1-suffix], y[len(y)-1-suffix]) {
+		suffix++
+	}
+
+	return trimResult{
+		prefix:     prefix,
+		oldTrimmed: x[prefix : len(x)-suffix],
+		newTrimmed: y[prefix : len(y)-suffix],
+		suffix:     suffix,
+	}
+}
+
+// computeLines computes structured diff lines for old and newText (assumed non-equal).
+func computeLines(oldName string, old []byte, newName string, newText []byte, cfg config) []Line {
+	x := splitLines(old)
+	y := splitLines(newText)
+
+	// diffHeaders is the number of fixed header lines prepended to every diff result:
+	// "diff …", "--- …", and "+++ …".
+	const diffHeaders = 3
+
+	headers := []Line{
+		{Kind: KindHeader, Content: fmt.Appendf(nil, "diff %s %s\n", oldName, newName)},
+		{Kind: KindHeader, Content: fmt.Appendf(nil, "--- %s\n", oldName)},
+		{Kind: KindHeader, Content: fmt.Appendf(nil, "+++ %s\n", newName)},
+	}
+
+	tr := trimPrefixSuffix(x, y)
+
+	if isDisjoint(tr.oldTrimmed, tr.newTrimmed) {
+		// Fast-path: no common lines — emit one hunk with all removals then all additions.
+		result := make([]Line, 0, diffHeaders+1+len(tr.oldTrimmed)+len(tr.newTrimmed))
+		result = append(result, headers...)
+
+		result = append(result, chunkHeader(
+			pair{tr.prefix, tr.prefix},
+			pair{len(tr.oldTrimmed), len(tr.newTrimmed)},
+		))
+		for _, s := range tr.oldTrimmed {
+			result = append(result, Line{Kind: KindRemoved, Content: s})
+		}
+
+		for _, s := range tr.newTrimmed {
+			result = append(result, Line{Kind: KindAdded, Content: s})
+		}
+
+		return result
+	}
+
+	// Run TGS on the trimmed middle only, then offset the returned pairs back
+	// into full-array coordinates so groupIntoHunks draws context from the
+	// correct positions (including up to contextLines lines from the prefix).
+	pairs := tgs(tr.oldTrimmed, tr.newTrimmed)
+	for i := range pairs {
+		pairs[i].x += tr.prefix
+		pairs[i].y += tr.prefix
+	}
+
+	hunks := groupIntoHunks(pairs, x, y, cfg.contextLines)
+	result := make([]Line, 0, diffHeaders+len(hunks))
+	result = append(result, headers...)
+	result = append(result, hunks...)
 
 	return result
 }
@@ -286,6 +394,54 @@ func splitLines(x []byte) [][]byte {
 	}
 
 	return lines
+}
+
+const (
+	// defaultContextLines is the default number of unchanged context lines shown around each change.
+	defaultContextLines = 3
+
+	// defaultSimilarityThreshold is the default minimum similarity ratio for intraline highlighting.
+	defaultSimilarityThreshold = 0.5
+)
+
+// config holds resolved options for a diff operation.
+type config struct {
+	contextLines        int
+	similarityThreshold float64
+}
+
+// defaultConfig returns a config with package defaults.
+func defaultConfig() config {
+	return config{
+		contextLines:        defaultContextLines,
+		similarityThreshold: defaultSimilarityThreshold,
+	}
+}
+
+// Option is a functional option that configures a diff operation.
+type Option func(*config)
+
+// WithContext sets the number of unchanged context lines shown around each change.
+// The default is 3. Pass 0 to suppress context entirely.
+func WithContext(n int) Option {
+	return func(c *config) { c.contextLines = n }
+}
+
+// WithSimilarityThreshold sets the minimum similarity ratio for intraline highlighting.
+// ratio = 2*equalRunes / (len(removedRunes) + len(addedRunes)).
+// Default is 0.5. Use 0.0 to always highlight; 1.0 to never highlight.
+func WithSimilarityThreshold(t float64) Option {
+	return func(c *config) { c.similarityThreshold = t }
+}
+
+// applyOptions builds a config from defaults and the provided options.
+func applyOptions(opts []Option) config {
+	cfg := defaultConfig()
+	for _, o := range opts {
+		o(&cfg)
+	}
+
+	return cfg
 }
 
 // tgsYStep is the per-occurrence decrement applied to y-side entries in the

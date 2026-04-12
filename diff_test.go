@@ -2,8 +2,10 @@ package diff_test
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"go.followtheprocess.codes/diff"
@@ -230,6 +232,203 @@ func BenchmarkDiff(b *testing.B) {
 
 	for b.Loop() {
 		diff.Diff(archive.Files[0].Name, old, archive.Files[1].Name, newContent)
+	}
+}
+
+// TestWithContextOption verifies WithContext is accepted and the default (3) is unchanged.
+func TestWithContextOption(t *testing.T) {
+	tests := []struct {
+		name    string
+		old     []byte
+		newText []byte
+		opts    []diff.Option
+		wantLen int // expected number of Lines returned
+	}{
+		{
+			// Default context=3: 3 headers + 1 @@ + 2 context (a, b) + 1 removed + 1 added = 8
+			name:    "default context unchanged",
+			old:     []byte("a\nb\nc\n"),
+			newText: []byte("a\nb\nd\n"),
+			opts:    nil,
+			wantLen: 8,
+		},
+		{
+			// WithContext(0): 3 headers + 1 @@ + 1 removed + 1 added = 6
+			name:    "WithContext(0) suppresses context lines",
+			old:     []byte("a\nb\nc\n"),
+			newText: []byte("a\nb\nd\n"),
+			opts:    []diff.Option{diff.WithContext(0)},
+			wantLen: 6,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := diff.Lines("old", tt.old, "new", tt.newText, tt.opts...)
+			if len(got) != tt.wantLen {
+				t.Fatalf("Lines() returned %d lines, want %d\n%#v", len(got), tt.wantLen, got)
+			}
+		})
+	}
+}
+
+// TestGroupIntoHunksViaWithContext verifies the extracted groupIntoHunks function
+// respects the contextLines setting via the WithContext option.
+func TestGroupIntoHunksViaWithContext(t *testing.T) {
+	tests := []struct {
+		opt         diff.Option
+		name        string
+		old         []byte
+		new         []byte
+		wantContext int
+	}{
+		{
+			name:        "default 3 context lines",
+			old:         []byte("a\nb\nc\nd\ne\nf\ng\n"),
+			new:         []byte("a\nb\nc\nX\ne\nf\ng\n"),
+			opt:         diff.WithContext(3),
+			wantContext: 6, // 3 before + 3 after the change
+		},
+		{
+			name:        "zero context lines",
+			old:         []byte("a\nb\nc\nd\ne\nf\ng\n"),
+			new:         []byte("a\nb\nc\nX\ne\nf\ng\n"),
+			opt:         diff.WithContext(0),
+			wantContext: 0,
+		},
+		{
+			name:        "one context line",
+			old:         []byte("a\nb\nc\nd\ne\nf\ng\n"),
+			new:         []byte("a\nb\nc\nX\ne\nf\ng\n"),
+			opt:         diff.WithContext(1),
+			wantContext: 2, // 1 before + 1 after
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lines := diff.Lines("old", tt.old, "new", tt.new, tt.opt)
+
+			contextCount := 0
+
+			for _, l := range lines {
+				if l.Kind == diff.KindContext {
+					contextCount++
+				}
+			}
+
+			if contextCount != tt.wantContext {
+				t.Fatalf("got %d KindContext lines, want %d\n%#v", contextCount, tt.wantContext, lines)
+			}
+		})
+	}
+}
+
+// TestLargeCommonRegionsProduceCorrectLineNumbers verifies that inputs with large
+// common regions produce correct line numbers and only show contextLines of context
+// (not the whole prefix).
+func TestLargeCommonRegionsProduceCorrectLineNumbers(t *testing.T) {
+	tests := []struct {
+		name        string
+		old         string
+		new         string
+		wantHunk    string
+		wantContext int
+	}{
+		{
+			// 100-line common prefix, then 1 changed line.
+			// Hunk shows lines 98–101 (3 context + 1 change = 4 lines each side).
+			name:        "large common prefix — correct line numbers",
+			old:         strings.Repeat("line\n", 100) + "old content\n",
+			new:         strings.Repeat("line\n", 100) + "new content\n",
+			wantContext: 3,
+			wantHunk:    "@@ -98,4 +98,4 @@",
+		},
+		{
+			// 1 changed line at the start, then 100-line common suffix.
+			name:        "large common suffix — correct line numbers",
+			old:         "old content\n" + strings.Repeat("line\n", 100),
+			new:         "new content\n" + strings.Repeat("line\n", 100),
+			wantContext: 3,
+			wantHunk:    "@@ -1,4 +1,4 @@",
+		},
+		{
+			// 50 common prefix + 1 change + 50 common suffix.
+			name:        "common prefix and suffix",
+			old:         strings.Repeat("line\n", 50) + "old\n" + strings.Repeat("line\n", 50),
+			new:         strings.Repeat("line\n", 50) + "new\n" + strings.Repeat("line\n", 50),
+			wantContext: 6, // 3 before + 3 after
+			wantHunk:    "@@ -48,7 +48,7 @@",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lines := diff.Lines("old", []byte(tt.old), "new", []byte(tt.new))
+
+			contextCount := 0
+
+			var hunkHeader string
+
+			for _, l := range lines {
+				if l.Kind == diff.KindContext {
+					contextCount++
+				}
+
+				if l.Kind == diff.KindHeader && len(l.Content) > 2 && l.Content[0] == '@' {
+					hunkHeader = strings.TrimSuffix(string(l.Content), "\n")
+				}
+			}
+
+			if contextCount != tt.wantContext {
+				t.Errorf("context line count = %d, want %d", contextCount, tt.wantContext)
+			}
+
+			if hunkHeader != tt.wantHunk {
+				t.Errorf("hunk header = %q, want %q", hunkHeader, tt.wantHunk)
+			}
+		})
+	}
+}
+
+// TestDisjointFastPath verifies that large fully-disjoint inputs produce the
+// correct all-removed / all-added diff output (same as the normal TGS path).
+func TestDisjointFastPath(t *testing.T) {
+	// Build two 512-line files with no lines in common.
+	var oldLines, newLines strings.Builder
+	for i := range 512 {
+		fmt.Fprintf(&oldLines, "old line %d\n", i)
+		fmt.Fprintf(&newLines, "new line %d\n", i)
+	}
+
+	old := []byte(oldLines.String())
+	newText := []byte(newLines.String())
+
+	lines := diff.Lines("old", old, "new", newText)
+	if lines == nil {
+		t.Fatal("Lines() returned nil for non-equal inputs")
+	}
+
+	removed := 0
+	added := 0
+
+	for _, l := range lines {
+		switch l.Kind {
+		case diff.KindRemoved:
+			removed++
+		case diff.KindAdded:
+			added++
+		default:
+			// KindHeader and KindContext lines are not counted
+		}
+	}
+
+	if removed != 512 {
+		t.Errorf("removed line count = %d, want 512", removed)
+	}
+
+	if added != 512 {
+		t.Errorf("added line count = %d, want 512", added)
 	}
 }
 
