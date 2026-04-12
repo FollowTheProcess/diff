@@ -25,22 +25,57 @@ var (
 	prefixAdded   = []byte("+ ")
 )
 
-// Render formats a []diff.Line as a colourised byte slice suitable for terminal output.
-// Returns nil if lines is nil or empty. Options are forwarded to [diff.CharDiff] and
-// control intraline highlighting behaviour (e.g. [diff.WithSimilarityThreshold]).
+const defaultSimilarityThreshold = 0.5
+
+// config holds resolved options for a render operation.
+type config struct {
+	similarityThreshold float64
+}
+
+// defaultConfig returns a config with package defaults.
+func defaultConfig() config {
+	return config{similarityThreshold: defaultSimilarityThreshold}
+}
+
+// Option is a functional option that configures a render operation.
+type Option func(*config)
+
+// WithSimilarityThreshold sets the minimum similarity ratio for intraline highlighting.
+// ratio = 2*equalRunes / (len(removedRunes) + len(addedRunes)).
+// Default is 0.5. Use 0.0 to always highlight; 1.0 to never highlight.
+func WithSimilarityThreshold(t float64) Option {
+	return func(c *config) { c.similarityThreshold = t }
+}
+
+// applyOptions builds a config from defaults and the provided options.
+func applyOptions(opts []Option) config {
+	cfg := defaultConfig()
+	for _, o := range opts {
+		o(&cfg)
+	}
+
+	return cfg
+}
+
+// Render formats a diff.Diff as a colourised byte slice suitable for terminal output.
+// Returns nil if d is the zero value (equal inputs). Options control intraline
+// highlighting behaviour (e.g. [WithSimilarityThreshold]).
 //
 // Colour scheme:
 //   - "diff …" and "@@ … @@" header lines are bold with no colour.
 //   - "--- …" header lines are red; "+++ …" header lines are green.
 //   - Context lines are unstyled with a double-space prefix.
 //   - When a run of removed lines is immediately followed by an equal-length run
-//     of added lines, each pair is diffed at the character level via [diff.CharDiff]
-//     and changed characters are highlighted with a coloured background.
+//     of added lines, each pair is diffed at the character level and changed
+//     characters are highlighted with a coloured background.
 //   - Otherwise whole-line colour is applied with no character-level highlighting.
-func Render(lines []diff.Line, opts ...diff.Option) []byte {
+func Render(d diff.Diff, opts ...Option) []byte {
+	lines := d.Lines()
 	if len(lines) == 0 {
 		return nil
 	}
+
+	cfg := applyOptions(opts)
 
 	var buf []byte
 
@@ -58,7 +93,7 @@ func Render(lines []diff.Line, opts ...diff.Option) []byte {
 			i++
 
 		case diff.KindRemoved:
-			buf, i = appendRemovedBlock(buf, lines, i, opts)
+			buf, i = appendRemovedBlock(buf, lines, i, cfg)
 
 		case diff.KindAdded:
 			buf, i = appendAddedBlock(buf, lines, i)
@@ -94,7 +129,7 @@ func appendContext(buf []byte, line diff.Line) []byte {
 
 // appendRemovedBlock collects a consecutive run of removed lines and any immediately
 // following added lines starting at index i, renders them, and returns the updated buf and index.
-func appendRemovedBlock(buf []byte, lines []diff.Line, i int, opts []diff.Option) ([]byte, int) {
+func appendRemovedBlock(buf []byte, lines []diff.Line, i int, cfg config) ([]byte, int) {
 	start := i
 	for i < len(lines) && lines[i].Kind == diff.KindRemoved {
 		i++
@@ -109,7 +144,7 @@ func appendRemovedBlock(buf []byte, lines []diff.Line, i int, opts []diff.Option
 	added := lines[removedEnd:i]
 
 	if len(removed) == len(added) {
-		return renderInlinePairs(buf, removed, added, opts), i
+		return renderInlinePairs(buf, removed, added, cfg), i
 	}
 
 	return renderWholeLine(buf, removed, added), i
@@ -127,27 +162,27 @@ func appendAddedBlock(buf []byte, lines []diff.Line, i int) ([]byte, int) {
 }
 
 // renderInlinePairs renders 1:1 paired removed/added lines with character-level inline diff.
-func renderInlinePairs(buf []byte, removed, added []diff.Line, opts []diff.Option) []byte {
+func renderInlinePairs(buf []byte, removed, added []diff.Line, cfg config) []byte {
 	for k := range removed {
-		ic := diff.CharDiff(removed[k].Content, added[k].Content, opts...)
+		ic := charDiff(removed[k].Content, added[k].Content, cfg)
 
 		buf = styleRemovedLine.AppendText(buf, prefixRemoved)
 
-		for _, seg := range ic.Removed {
-			if seg.Changed {
-				buf = styleRemovedHighlight.AppendText(buf, seg.Text)
+		for _, seg := range ic.removed {
+			if seg.changed {
+				buf = styleRemovedHighlight.AppendText(buf, seg.text)
 			} else {
-				buf = styleRemovedLine.AppendText(buf, seg.Text)
+				buf = styleRemovedLine.AppendText(buf, seg.text)
 			}
 		}
 
 		buf = styleAddedLine.AppendText(buf, prefixAdded)
 
-		for _, seg := range ic.Added {
-			if seg.Changed {
-				buf = styleAddedHighlight.AppendText(buf, seg.Text)
+		for _, seg := range ic.added {
+			if seg.changed {
+				buf = styleAddedHighlight.AppendText(buf, seg.text)
 			} else {
-				buf = styleAddedLine.AppendText(buf, seg.Text)
+				buf = styleAddedLine.AppendText(buf, seg.text)
 			}
 		}
 	}

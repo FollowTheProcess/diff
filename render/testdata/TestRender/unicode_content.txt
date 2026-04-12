@@ -1,0 +1,7 @@
+[1mdiff want got
+[0m[31m--- want
+[0m[32m+++ got
+[0m[1m@@ -1,1 +1,1 @@
+[0m[31m- [0m[31mHéllo, wörld!
+[0m[32m+ [0m[32mHéllo, wörld![0m[1;30;42m Ünïcödé.[0m[32m
+[0m
