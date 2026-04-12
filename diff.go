@@ -10,7 +10,7 @@
 // and new. Unique lines anchor the matching regions, producing cleaner output than
 // standard diff — blank lines and closing braces are not reused as false anchors.
 // The algorithm runs in O(n log n) rather than the standard O(n²).
-package diff
+package diff // import "go.followtheprocess.codes/diff"
 
 import (
 	"bytes"
