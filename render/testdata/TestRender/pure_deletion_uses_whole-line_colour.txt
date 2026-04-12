@@ -1,0 +1,6 @@
+[1mdiff want got
+[0m[31m--- want
+[0m[32m+++ got
+[0m[1m@@ -1,1 +0,0 @@
+[0m[31m- [0m[31mold line
+[0m

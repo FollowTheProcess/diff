@@ -1,5 +1,5 @@
-// Package diff provides an anchored diff algorithm with structured line output,
-// character-level inline diff, and a plain unified-diff formatter.
+// Package diff provides an anchored diff algorithm with structured line output
+// and a plain unified-diff formatter.
 //
 // The core algorithm is derived from the Go standard library's internal/diff package
 // (https://github.com/golang/go/tree/master/src/internal/diff).
@@ -52,134 +52,86 @@ func (k LineKind) String() string {
 // For KindHeader lines, Content holds the full raw line including its newline.
 // For all other kinds, Content holds the line text as it appeared in the source,
 // including its trailing newline if present. Content aliases the original input
-// passed to [Lines] or [Diff]; callers must not modify it.
+// passed to [New]; callers must not modify it.
 type Line struct {
 	Content []byte
 	Kind    LineKind
 }
 
-// LinePair groups a contiguous block of removed lines with the immediately
-// following block of added lines. Either field may be nil if the change is
-// a pure insertion or pure deletion.
-//
-// LinePair is produced by [Pairs] and is intended for downstream consumers
-// (e.g. custom renderers) that need to perform per-pair operations such as
-// intraline diff highlighting.
-type LinePair struct {
-	Removed []Line
-	Added   []Line
+const (
+	// defaultContextLines is the default number of unchanged context lines shown around each change.
+	defaultContextLines = 3
+)
+
+// config holds resolved options for a diff operation.
+type config struct {
+	contextLines int
 }
 
-// Pairs groups the KindRemoved and KindAdded lines from a structured diff into
-// LinePair values. Each LinePair holds one contiguous block of removed lines
-// and/or the immediately following block of added lines. KindContext and
-// KindHeader lines are skipped.
-//
-// The input is typically the slice returned by [Lines]. Pairs returns nil if
-// lines contains no KindRemoved or KindAdded lines.
-//
-// The Removed and Added slices in each LinePair are subslices of the input;
-// callers must not modify the input slice or the Line values within it after
-// calling Pairs.
-func Pairs(lines []Line) []LinePair {
-	var result []LinePair
+// defaultConfig returns a config with package defaults.
+func defaultConfig() config {
+	return config{contextLines: defaultContextLines}
+}
 
-	i := 0
-	for i < len(lines) {
-		kind := lines[i].Kind
-		if kind != KindRemoved && kind != KindAdded {
-			i++
-			continue
-		}
+// Option is a functional option that configures a diff operation.
+type Option func(*config)
 
-		// Collect contiguous removed block.
-		start := i
-		for i < len(lines) && lines[i].Kind == KindRemoved {
-			i++
-		}
+// WithContext sets the number of unchanged context lines shown around each change.
+// The default is 3. Pass 0 to suppress context entirely.
+func WithContext(n int) Option {
+	return func(c *config) { c.contextLines = n }
+}
 
-		removed := lines[start:i]
-		if len(removed) == 0 {
-			removed = nil
-		}
-
-		// Collect immediately following added block.
-		start = i
-		for i < len(lines) && lines[i].Kind == KindAdded {
-			i++
-		}
-
-		added := lines[start:i]
-		if len(added) == 0 {
-			added = nil
-		}
-
-		result = append(result, LinePair{Removed: removed, Added: added})
+// applyOptions builds a config from defaults and the provided options.
+func applyOptions(opts []Option) config {
+	cfg := defaultConfig()
+	for _, o := range opts {
+		o(&cfg)
 	}
 
-	return result
+	return cfg
 }
 
-// pair is a pair of line indexes, one for each side of the diff.
-type pair struct{ x, y int }
+// Diff is the result of comparing two texts. The zero value represents no changes
+// (identical inputs). Use [New] to compute a diff.
+type Diff struct {
+	lines []Line // nil when inputs are equal
+}
 
-// Lines returns the structured diff lines for old and newText.
-// Returns nil if old and newText are identical.
-//
-// The returned slice contains KindHeader lines for the diff/---/+++/@@ metadata,
-// followed by KindContext, KindRemoved, and KindAdded lines for the diff body.
-// Content on each Line holds the raw line text without any diff prefix.
-//
-// The structured form is useful for custom rendering; for plain unified-diff
-// text output use [Diff].
-func Lines(oldName string, old []byte, newName string, newText []byte, opts ...Option) []Line {
+// New computes an anchored diff between old and new and returns a Diff.
+// Call [Diff.Equal] to test whether the inputs were identical.
+func New(oldName string, old []byte, newName string, newText []byte, opts ...Option) Diff {
 	if bytes.Equal(old, newText) {
-		return nil
+		return Diff{}
 	}
 
-	return computeLines(oldName, old, newName, newText, applyOptions(opts))
+	return Diff{lines: computeLines(oldName, old, newName, newText, applyOptions(opts))}
 }
 
-// Diff returns an anchored unified diff of old and newText as raw bytes.
-// Returns nil if old and newText are identical.
-//
-// Unix diff implementations typically look for a diff with the smallest number
-// of lines inserted and removed, which can in the worst case take time quadratic
-// in the number of lines. As a result, many implementations either can be made to
-// run for a long time or cut off the search after a predetermined amount of work.
-//
-// In contrast, this implementation looks for a diff with the smallest number of
-// "unique" lines inserted and removed, where unique means a line that appears just
-// once in both old and new. We call this an "anchored diff" because the unique
-// lines anchor the chosen matching regions. An anchored diff is usually clearer
-// than a standard diff, because the algorithm does not try to reuse unrelated blank
-// lines or closing braces. The algorithm also guarantees to run in O(n log n) time
-// instead of the standard O(n²) time.
-//
-// Some systems call this approach a "patience diff," named for the "patience
-// sorting" algorithm, itself named for a solitaire card game. We avoid that name
-// for two reasons. First, the name has been used for a few different variants of
-// the algorithm, so it is imprecise. Second, the name is frequently interpreted as
-// meaning that you have to wait longer (to be patient) for the diff, meaning that
-// it is a slower algorithm, when in fact the algorithm is faster than the standard one.
-//
-// For structured line-by-line output use [Lines].
-func Diff(
-	oldName string,
-	old []byte,
-	newName string,
-	newText []byte,
-	opts ...Option,
-) []byte {
-	if bytes.Equal(old, newText) {
-		return nil
-	}
+// Equal reports whether the two inputs were identical (no changes).
+func (d Diff) Equal() bool {
+	return len(d.lines) == 0
+}
 
-	structured := computeLines(oldName, old, newName, newText, applyOptions(opts))
+// Lines returns the structured diff lines, or nil if the inputs were equal.
+//
+// The returned slice contains [KindHeader] lines for the diff/---/+++/@@ metadata,
+// followed by [KindContext], [KindRemoved], and [KindAdded] lines for the diff body.
+// Content on each [Line] holds the raw line text without any diff prefix.
+func (d Diff) Lines() []Line {
+	return d.lines
+}
+
+// String implements [fmt.Stringer], returning the diff as a plain unified-diff string.
+// Returns an empty string when the inputs were equal.
+func (d Diff) String() string {
+	if d.Equal() {
+		return ""
+	}
 
 	var out bytes.Buffer
 
-	for _, line := range structured {
+	for _, line := range d.lines {
 		switch line.Kind {
 		case KindHeader:
 			out.Write(line.Content)
@@ -197,8 +149,11 @@ func Diff(
 		}
 	}
 
-	return out.Bytes()
+	return out.String()
 }
+
+// pair is a pair of line indexes, one for each side of the diff.
+type pair struct{ x, y int }
 
 // groupIntoHunks groups the unique-line match pairs returned by [tgs] into
 // context-annotated diff Lines.
@@ -512,54 +467,6 @@ func splitLines(x []byte) [][]byte {
 	}
 
 	return lines
-}
-
-const (
-	// defaultContextLines is the default number of unchanged context lines shown around each change.
-	defaultContextLines = 3
-
-	// defaultSimilarityThreshold is the default minimum similarity ratio for intraline highlighting.
-	defaultSimilarityThreshold = 0.5
-)
-
-// config holds resolved options for a diff operation.
-type config struct {
-	contextLines        int
-	similarityThreshold float64
-}
-
-// defaultConfig returns a config with package defaults.
-func defaultConfig() config {
-	return config{
-		contextLines:        defaultContextLines,
-		similarityThreshold: defaultSimilarityThreshold,
-	}
-}
-
-// Option is a functional option that configures a diff operation.
-type Option func(*config)
-
-// WithContext sets the number of unchanged context lines shown around each change.
-// The default is 3. Pass 0 to suppress context entirely.
-func WithContext(n int) Option {
-	return func(c *config) { c.contextLines = n }
-}
-
-// WithSimilarityThreshold sets the minimum similarity ratio for intraline highlighting.
-// ratio = 2*equalRunes / (len(removedRunes) + len(addedRunes)).
-// Default is 0.5. Use 0.0 to always highlight; 1.0 to never highlight.
-func WithSimilarityThreshold(t float64) Option {
-	return func(c *config) { c.similarityThreshold = t }
-}
-
-// applyOptions builds a config from defaults and the provided options.
-func applyOptions(opts []Option) config {
-	cfg := defaultConfig()
-	for _, o := range opts {
-		o(&cfg)
-	}
-
-	return cfg
 }
 
 // tgsYStep is the per-occurrence decrement applied to y-side entries in the

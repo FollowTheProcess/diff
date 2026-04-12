@@ -1,0 +1,9 @@
+[1mdiff want got
+[0m[31m--- want
+[0m[32m+++ got
+[0m[1m@@ -1,2 +1,2 @@
+[0m[31m- [0m[31mfoo ba[0m[1;30;41mr[0m[31m
+[0m[32m+ [0m[32mfoo ba[0m[1;30;42mz[0m[32m
+[0m[31m- [0m[31mbaz qux
+[0m[32m+ [0m[32mbaz q[0m[1;30;42mu[0m[32mux
+[0m

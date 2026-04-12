@@ -12,7 +12,7 @@ import (
 	"golang.org/x/tools/txtar"
 )
 
-// TestLines verifies the Lines function returns structured diff lines.
+// TestLines verifies the Lines method returns structured diff lines.
 func TestLines(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -118,7 +118,7 @@ func TestLines(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := diff.Lines(tt.oldName, tt.old, tt.newName, tt.newText)
+			got := diff.New(tt.oldName, tt.old, tt.newName, tt.newText).Lines()
 			if tt.want == nil {
 				if got != nil {
 					t.Fatalf("Lines() = %v, want nil", got)
@@ -150,8 +150,8 @@ func TestLines(t *testing.T) {
 	}
 }
 
-// TestDiffNilOnEqual verifies Diff returns nil when old and newText are identical.
-func TestDiffNilOnEqual(t *testing.T) {
+// TestEqual verifies Equal returns true when old and new are identical.
+func TestEqual(t *testing.T) {
 	tests := []struct {
 		name string
 		old  []byte
@@ -171,14 +171,62 @@ func TestDiffNilOnEqual(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := diff.Diff("a", tt.old, "b", tt.new); got != nil {
-				t.Fatalf("Diff() = %q, want nil for equal inputs", got)
+			if got := diff.New("a", tt.old, "b", tt.new); !got.Equal() {
+				t.Fatal("Equal() = false, want true for identical inputs")
 			}
 		})
 	}
 }
 
-// Test drives Diff against the *.txtar files in testdata/.
+// TestString verifies String returns an empty string for equal inputs and a
+// non-empty unified diff for differing inputs.
+func TestString(t *testing.T) {
+	tests := []struct {
+		name        string
+		wantContain string
+		old         []byte
+		new         []byte
+		wantEmpty   bool
+	}{
+		{
+			name:      "equal inputs produce empty string",
+			old:       []byte("same\n"),
+			new:       []byte("same\n"),
+			wantEmpty: true,
+		},
+		{
+			name:      "both empty inputs produce empty string",
+			old:       []byte(""),
+			new:       []byte(""),
+			wantEmpty: true,
+		},
+		{
+			name:        "differing inputs produce non-empty unified diff",
+			old:         []byte("hello\nworld\n"),
+			new:         []byte("hello\nearth\n"),
+			wantContain: "- world",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := diff.New("a", tt.old, "b", tt.new).String()
+			if tt.wantEmpty {
+				if got != "" {
+					t.Fatalf("String() = %q, want empty string for equal inputs", got)
+				}
+
+				return
+			}
+
+			if !strings.Contains(got, tt.wantContain) {
+				t.Fatalf("String() = %q, want it to contain %q", got, tt.wantContain)
+			}
+		})
+	}
+}
+
+// Test drives New against the *.txtar files in testdata/.
 func Test(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join("testdata", "*.txtar"))
 	if err != nil {
@@ -203,17 +251,17 @@ func Test(t *testing.T) {
 				t.Fatalf("%s: want three files, third named \"diff\", got: %v", file, archive.Files)
 			}
 
-			diffs := diff.Diff(
+			got := diff.New(
 				archive.Files[0].Name,
 				clean(archive.Files[0].Data),
 				archive.Files[1].Name,
 				clean(archive.Files[1].Data),
-			)
-			want := clean(archive.Files[2].Data)
+			).String()
+			want := string(clean(archive.Files[2].Data))
 
-			if !bytes.Equal(diffs, want) {
+			if got != want {
 				t.Fatalf("%s: have:\n%s\nwant:\n%s\n%s", file,
-					diffs, want, diff.Diff("have", diffs, "want", want))
+					got, want, diff.New("have", []byte(got), "want", []byte(want)))
 			}
 		})
 	}
@@ -230,20 +278,28 @@ func FuzzLines(f *testing.F) {
 	f.Add([]byte("   \n\t\n"), []byte("   \n\t\n"))
 
 	f.Fuzz(func(t *testing.T, old, newContent []byte) {
-		result := diff.Lines("a", old, "b", newContent)
+		d := diff.New("a", old, "b", newContent)
 		if bytes.Equal(old, newContent) {
-			if result != nil {
+			if !d.Equal() {
+				t.Fatal("Equal() = false for equal inputs")
+			}
+
+			if d.Lines() != nil {
 				t.Fatal("Lines() = non-nil for equal inputs")
 			}
 		} else {
-			if result == nil {
+			if d.Equal() {
+				t.Fatal("Equal() = true for non-equal inputs")
+			}
+
+			if d.Lines() == nil {
 				t.Fatal("Lines() = nil for non-equal inputs")
 			}
 		}
 	})
 }
 
-// BenchmarkLines benchmarks the Lines function using long.txtar as realistic input.
+// BenchmarkLines benchmarks the Lines method using long.txtar as realistic input.
 func BenchmarkLines(b *testing.B) {
 	contents, err := os.ReadFile(filepath.Join("testdata", "long.txtar"))
 	if err != nil {
@@ -257,12 +313,12 @@ func BenchmarkLines(b *testing.B) {
 	b.ResetTimer()
 
 	for b.Loop() {
-		diff.Lines(archive.Files[0].Name, old, archive.Files[1].Name, newContent)
+		diff.New(archive.Files[0].Name, old, archive.Files[1].Name, newContent).Lines()
 	}
 }
 
-// BenchmarkDiff benchmarks the Diff function using long.txtar as realistic input.
-func BenchmarkDiff(b *testing.B) {
+// BenchmarkString benchmarks String using long.txtar as realistic input.
+func BenchmarkString(b *testing.B) {
 	contents, err := os.ReadFile(filepath.Join("testdata", "long.txtar"))
 	if err != nil {
 		b.Fatalf("could not read long.txtar: %v", err)
@@ -275,7 +331,7 @@ func BenchmarkDiff(b *testing.B) {
 	b.ResetTimer()
 
 	for b.Loop() {
-		diff.Diff(archive.Files[0].Name, old, archive.Files[1].Name, newContent)
+		_ = diff.New(archive.Files[0].Name, old, archive.Files[1].Name, newContent).String()
 	}
 }
 
@@ -308,7 +364,7 @@ func TestWithContextOption(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := diff.Lines("old", tt.old, "new", tt.newText, tt.opts...)
+			got := diff.New("old", tt.old, "new", tt.newText, tt.opts...).Lines()
 			if len(got) != tt.wantLen {
 				t.Fatalf("Lines() returned %d lines, want %d\n%#v", len(got), tt.wantLen, got)
 			}
@@ -351,7 +407,7 @@ func TestGroupIntoHunksViaWithContext(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			lines := diff.Lines("old", tt.old, "new", tt.new, tt.opt)
+			lines := diff.New("old", tt.old, "new", tt.new, tt.opt).Lines()
 
 			contextCount := 0
 
@@ -408,7 +464,7 @@ func TestLargeCommonRegionsProduceCorrectLineNumbers(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			lines := diff.Lines("old", []byte(tt.old), "new", []byte(tt.new))
+			lines := diff.New("old", []byte(tt.old), "new", []byte(tt.new)).Lines()
 
 			contextCount := 0
 
@@ -448,7 +504,12 @@ func TestDisjointFastPath(t *testing.T) {
 	old := []byte(oldLines.String())
 	newText := []byte(newLines.String())
 
-	lines := diff.Lines("old", old, "new", newText)
+	d := diff.New("old", old, "new", newText)
+	if d.Equal() {
+		t.Fatal("Equal() = true for non-equal inputs")
+	}
+
+	lines := d.Lines()
 	if lines == nil {
 		t.Fatal("Lines() returned nil for non-equal inputs")
 	}
@@ -473,170 +534,6 @@ func TestDisjointFastPath(t *testing.T) {
 
 	if added != 512 {
 		t.Errorf("added line count = %d, want 512", added)
-	}
-}
-
-// TestPairs verifies that Pairs groups consecutive removed/added blocks correctly.
-func TestPairs(t *testing.T) {
-	tests := []struct {
-		name  string
-		lines []diff.Line
-		want  []diff.LinePair
-	}{
-		{
-			name:  "nil input returns nil",
-			lines: nil,
-			want:  nil,
-		},
-		{
-			name: "only context lines returns nil",
-			lines: []diff.Line{
-				{Kind: diff.KindContext, Content: []byte("unchanged\n")},
-			},
-			want: nil,
-		},
-		{
-			name: "removed followed by added forms one pair",
-			lines: []diff.Line{
-				{Kind: diff.KindContext, Content: []byte("ctx\n")},
-				{Kind: diff.KindRemoved, Content: []byte("old\n")},
-				{Kind: diff.KindAdded, Content: []byte("new\n")},
-				{Kind: diff.KindContext, Content: []byte("ctx2\n")},
-			},
-			want: []diff.LinePair{
-				{
-					Removed: []diff.Line{{Kind: diff.KindRemoved, Content: []byte("old\n")}},
-					Added:   []diff.Line{{Kind: diff.KindAdded, Content: []byte("new\n")}},
-				},
-			},
-		},
-		{
-			name: "removed-only block has nil Added",
-			lines: []diff.Line{
-				{Kind: diff.KindRemoved, Content: []byte("gone\n")},
-				{Kind: diff.KindContext, Content: []byte("ctx\n")},
-			},
-			want: []diff.LinePair{
-				{
-					Removed: []diff.Line{{Kind: diff.KindRemoved, Content: []byte("gone\n")}},
-					Added:   nil,
-				},
-			},
-		},
-		{
-			name: "added-only block has nil Removed",
-			lines: []diff.Line{
-				{Kind: diff.KindContext, Content: []byte("ctx\n")},
-				{Kind: diff.KindAdded, Content: []byte("new\n")},
-			},
-			want: []diff.LinePair{
-				{
-					Removed: nil,
-					Added:   []diff.Line{{Kind: diff.KindAdded, Content: []byte("new\n")}},
-				},
-			},
-		},
-		{
-			name: "two separate change blocks produce two pairs",
-			lines: []diff.Line{
-				{Kind: diff.KindRemoved, Content: []byte("a\n")},
-				{Kind: diff.KindAdded, Content: []byte("b\n")},
-				{Kind: diff.KindContext, Content: []byte("ctx\n")},
-				{Kind: diff.KindRemoved, Content: []byte("c\n")},
-				{Kind: diff.KindAdded, Content: []byte("d\n")},
-			},
-			want: []diff.LinePair{
-				{
-					Removed: []diff.Line{{Kind: diff.KindRemoved, Content: []byte("a\n")}},
-					Added:   []diff.Line{{Kind: diff.KindAdded, Content: []byte("b\n")}},
-				},
-				{
-					Removed: []diff.Line{{Kind: diff.KindRemoved, Content: []byte("c\n")}},
-					Added:   []diff.Line{{Kind: diff.KindAdded, Content: []byte("d\n")}},
-				},
-			},
-		},
-		{
-			name: "header lines are skipped",
-			lines: []diff.Line{
-				{Kind: diff.KindHeader, Content: []byte("@@ -1,1 +1,1 @@\n")},
-				{Kind: diff.KindRemoved, Content: []byte("x\n")},
-				{Kind: diff.KindAdded, Content: []byte("y\n")},
-			},
-			want: []diff.LinePair{
-				{
-					Removed: []diff.Line{{Kind: diff.KindRemoved, Content: []byte("x\n")}},
-					Added:   []diff.Line{{Kind: diff.KindAdded, Content: []byte("y\n")}},
-				},
-			},
-		},
-		{
-			name: "added block before removed block produces two pairs",
-			lines: []diff.Line{
-				{Kind: diff.KindAdded, Content: []byte("new\n")},
-				{Kind: diff.KindContext, Content: []byte("ctx\n")},
-				{Kind: diff.KindRemoved, Content: []byte("old\n")},
-			},
-			want: []diff.LinePair{
-				{
-					Removed: nil,
-					Added:   []diff.Line{{Kind: diff.KindAdded, Content: []byte("new\n")}},
-				},
-				{
-					Removed: []diff.Line{{Kind: diff.KindRemoved, Content: []byte("old\n")}},
-					Added:   nil,
-				},
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := diff.Pairs(tt.lines)
-			if len(got) != len(tt.want) {
-				t.Fatalf("Pairs() returned %d pairs, want %d\ngot:  %#v\nwant: %#v",
-					len(got), len(tt.want), got, tt.want)
-			}
-
-			for i, p := range got {
-				assertLinePair(t, i, p, tt.want[i])
-			}
-		})
-	}
-}
-
-// assertLinePair verifies that a single LinePair matches the expected pair.
-func assertLinePair(t *testing.T, i int, got, want diff.LinePair) {
-	t.Helper()
-
-	if len(got.Removed) != len(want.Removed) {
-		t.Errorf("pair[%d].Removed len = %d, want %d", i, len(got.Removed), len(want.Removed))
-		return
-	}
-
-	if len(got.Added) != len(want.Added) {
-		t.Errorf("pair[%d].Added len = %d, want %d", i, len(got.Added), len(want.Added))
-		return
-	}
-
-	for j, line := range got.Removed {
-		if line.Kind != want.Removed[j].Kind {
-			t.Errorf("pair[%d].Removed[%d].Kind = %v, want %v", i, j, line.Kind, want.Removed[j].Kind)
-		}
-
-		if !bytes.Equal(line.Content, want.Removed[j].Content) {
-			t.Errorf("pair[%d].Removed[%d].Content = %q, want %q", i, j, line.Content, want.Removed[j].Content)
-		}
-	}
-
-	for j, line := range got.Added {
-		if line.Kind != want.Added[j].Kind {
-			t.Errorf("pair[%d].Added[%d].Kind = %v, want %v", i, j, line.Kind, want.Added[j].Kind)
-		}
-
-		if !bytes.Equal(line.Content, want.Added[j].Content) {
-			t.Errorf("pair[%d].Added[%d].Content = %q, want %q", i, j, line.Content, want.Added[j].Content)
-		}
 	}
 }
 
