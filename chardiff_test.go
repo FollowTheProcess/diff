@@ -222,6 +222,62 @@ func TestCharDiffNotSameForDifferent(t *testing.T) {
 	}
 }
 
+// TestCharDiffSimilarityGate verifies that WithSimilarityThreshold suppresses
+// intraline highlighting when the ratio of equal runes is below the threshold.
+func TestCharDiffSimilarityGate(t *testing.T) {
+	tests := []struct {
+		name             string
+		removed          []byte
+		added            []byte
+		threshold        float64
+		wantAllChanged   bool // true = expect single whole-line Changed segment (fallback)
+		wantHasUnchanged bool // true = expect at least one unchanged (intraline) segment
+	}{
+		{
+			// "func Foo() {" vs "type Bar struct {" share almost nothing.
+			// Default threshold 0.5 should suppress highlighting.
+			name:           "dissimilar lines suppressed at default threshold",
+			removed:        []byte("func Foo() {\n"),
+			added:          []byte("type Bar struct {\n"),
+			threshold:      0.5,
+			wantAllChanged: true,
+		},
+		{
+			// Same pair, but threshold=0 means always highlight.
+			name:             "dissimilar lines highlighted at threshold=0",
+			removed:          []byte("func Foo() {\n"),
+			added:            []byte("type Bar struct {\n"),
+			threshold:        0.0,
+			wantHasUnchanged: true, // " {" is common
+		},
+		{
+			// Highly similar lines should always produce intraline highlights.
+			name:             "similar lines produce intraline highlighting",
+			removed:          []byte("return fmt.Errorf(\"could not open file: %w\", err)\n"),
+			added:            []byte("return fmt.Errorf(\"failed to read config: %w\", err)\n"),
+			threshold:        0.5,
+			wantHasUnchanged: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := diff.CharDiff(tt.removed, tt.added, diff.WithSimilarityThreshold(tt.threshold))
+
+			assertJoinInvariant(t, result, tt.removed, tt.added)
+
+			if tt.wantAllChanged {
+				assertAllChangedExceptNL(t, result.Removed, "removed")
+				assertAllChangedExceptNL(t, result.Added, "added")
+			}
+
+			if tt.wantHasUnchanged {
+				assertHasUnchanged(t, result.Removed)
+			}
+		})
+	}
+}
+
 // BenchmarkCharDiff benchmarks the CharDiff function.
 func BenchmarkCharDiff(b *testing.B) {
 	removed := []byte("the quick brown fox jumps over the lazy dog\n")
@@ -302,6 +358,34 @@ func anyChanged(segs []diff.Segment) bool {
 	}
 
 	return false
+}
+
+// assertAllChangedExceptNL asserts that all segments are Changed=true, except for a
+// trailing standalone newline segment which is always Changed=false (to prevent ANSI
+// background colours from bleeding onto the next terminal line).
+func assertAllChangedExceptNL(t *testing.T, segs []diff.Segment, side string) {
+	t.Helper()
+
+	for i, seg := range segs {
+		isTrailingNL := len(seg.Text) == 1 && seg.Text[0] == '\n'
+		if !seg.Changed && !isTrailingNL {
+			t.Errorf("%s segment[%d] Changed=false, want whole-line fallback", side, i)
+		}
+	}
+}
+
+// assertHasUnchanged asserts that at least one segment in segs has Changed=false,
+// meaning intraline highlighting found common content.
+func assertHasUnchanged(t *testing.T, segs []diff.Segment) {
+	t.Helper()
+
+	for _, seg := range segs {
+		if !seg.Changed {
+			return
+		}
+	}
+
+	t.Error("expected at least one unchanged segment for similar lines")
 }
 
 func joinSegments(segs []diff.Segment) string {

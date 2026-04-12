@@ -26,7 +26,8 @@ var (
 )
 
 // Render formats a []diff.Line as a colourised byte slice suitable for terminal output.
-// Returns nil if lines is nil or empty.
+// Returns nil if lines is nil or empty. Options are forwarded to [diff.CharDiff] and
+// control intraline highlighting behaviour (e.g. [diff.WithSimilarityThreshold]).
 //
 // Colour scheme:
 //   - "diff …" and "@@ … @@" header lines are bold with no colour.
@@ -36,7 +37,7 @@ var (
 //     of added lines, each pair is diffed at the character level via [diff.CharDiff]
 //     and changed characters are highlighted with a coloured background.
 //   - Otherwise whole-line colour is applied with no character-level highlighting.
-func Render(lines []diff.Line) []byte {
+func Render(lines []diff.Line, opts ...diff.Option) []byte {
 	if len(lines) == 0 {
 		return nil
 	}
@@ -57,7 +58,7 @@ func Render(lines []diff.Line) []byte {
 			i++
 
 		case diff.KindRemoved:
-			buf, i = appendRemovedBlock(buf, lines, i)
+			buf, i = appendRemovedBlock(buf, lines, i, opts)
 
 		case diff.KindAdded:
 			buf, i = appendAddedBlock(buf, lines, i)
@@ -93,7 +94,7 @@ func appendContext(buf []byte, line diff.Line) []byte {
 
 // appendRemovedBlock collects a consecutive run of removed lines and any immediately
 // following added lines starting at index i, renders them, and returns the updated buf and index.
-func appendRemovedBlock(buf []byte, lines []diff.Line, i int) ([]byte, int) {
+func appendRemovedBlock(buf []byte, lines []diff.Line, i int, opts []diff.Option) ([]byte, int) {
 	start := i
 	for i < len(lines) && lines[i].Kind == diff.KindRemoved {
 		i++
@@ -108,7 +109,7 @@ func appendRemovedBlock(buf []byte, lines []diff.Line, i int) ([]byte, int) {
 	added := lines[removedEnd:i]
 
 	if len(removed) == len(added) {
-		return renderInlinePairs(buf, removed, added), i
+		return renderInlinePairs(buf, removed, added, opts), i
 	}
 
 	return renderWholeLine(buf, removed, added), i
@@ -126,9 +127,9 @@ func appendAddedBlock(buf []byte, lines []diff.Line, i int) ([]byte, int) {
 }
 
 // renderInlinePairs renders 1:1 paired removed/added lines with character-level inline diff.
-func renderInlinePairs(buf []byte, removed, added []diff.Line) []byte {
+func renderInlinePairs(buf []byte, removed, added []diff.Line, opts []diff.Option) []byte {
 	for k := range removed {
-		ic := diff.CharDiff(removed[k].Content, added[k].Content)
+		ic := diff.CharDiff(removed[k].Content, added[k].Content, opts...)
 
 		buf = styleRemovedLine.AppendText(buf, prefixRemoved)
 
