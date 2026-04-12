@@ -1,6 +1,7 @@
 package diff_test
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -395,4 +396,92 @@ func joinSegments(segs []diff.Segment) string {
 	}
 
 	return sb.String()
+}
+
+func TestWordDiff(t *testing.T) {
+	tests := []struct {
+		name             string
+		removed          []byte
+		added            []byte
+		wantAllUnchanged bool
+		wantHasChanged   bool
+	}{
+		{
+			name:             "identical lines - all segments unchanged",
+			removed:          []byte("return foo\n"),
+			added:            []byte("return foo\n"),
+			wantAllUnchanged: true,
+		},
+		{
+			name:           "changed word - only the word is highlighted",
+			removed:        []byte("return foo\n"),
+			added:          []byte("return bar\n"),
+			wantHasChanged: true,
+		},
+		{
+			name:           "completely different lines",
+			removed:        []byte("abc def\n"),
+			added:          []byte("xyz qrs\n"),
+			wantHasChanged: true,
+		},
+		{
+			name:           "empty removed",
+			removed:        []byte(""),
+			added:          []byte("new content\n"),
+			wantHasChanged: true,
+		},
+		{
+			name:           "invalid UTF-8 falls back to whole-line",
+			removed:        []byte("\xff\xfe old\n"),
+			added:          []byte("new content\n"),
+			wantHasChanged: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := diff.WordDiff(tt.removed, tt.added)
+
+			assertJoinInvariant(t, result, tt.removed, tt.added)
+
+			if tt.wantAllUnchanged {
+				assertNoneChanged(t, result.Removed, "removed")
+				assertNoneChanged(t, result.Added, "added")
+			}
+
+			if tt.wantHasChanged {
+				if !anyChanged(result.Removed) && !anyChanged(result.Added) {
+					t.Error("WordDiff on differing inputs should produce at least one Changed segment")
+				}
+			}
+		})
+	}
+}
+
+func FuzzWordDiff(f *testing.F) {
+	f.Add([]byte("return foo\n"), []byte("return bar\n"))
+	f.Add([]byte("hello world\n"), []byte("hello earth\n"))
+	f.Add([]byte(""), []byte(""))
+
+	f.Fuzz(func(t *testing.T, removed, added []byte) {
+		got := diff.WordDiff(removed, added)
+
+		var rConcat []byte
+		for _, s := range got.Removed {
+			rConcat = append(rConcat, s.Text...)
+		}
+
+		if !bytes.Equal(rConcat, removed) {
+			t.Fatalf("Removed concat %q != input %q", rConcat, removed)
+		}
+
+		var aConcat []byte
+		for _, s := range got.Added {
+			aConcat = append(aConcat, s.Text...)
+		}
+
+		if !bytes.Equal(aConcat, added) {
+			t.Fatalf("Added concat %q != input %q", aConcat, added)
+		}
+	})
 }

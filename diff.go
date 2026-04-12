@@ -58,6 +58,68 @@ type Line struct {
 	Kind    LineKind
 }
 
+// LinePair groups a contiguous block of removed lines with the immediately
+// following block of added lines. Either field may be nil if the change is
+// a pure insertion or pure deletion.
+//
+// LinePair is produced by [Pairs] and is intended for downstream consumers
+// (e.g. custom renderers) that need to perform per-pair operations such as
+// intraline diff highlighting.
+type LinePair struct {
+	Removed []Line
+	Added   []Line
+}
+
+// Pairs groups the KindRemoved and KindAdded lines from a structured diff into
+// LinePair values. Each LinePair holds one contiguous block of removed lines
+// and/or the immediately following block of added lines. KindContext and
+// KindHeader lines are skipped.
+//
+// The input is typically the slice returned by [Lines]. Pairs returns nil if
+// lines contains no KindRemoved or KindAdded lines.
+//
+// The Removed and Added slices in each LinePair are subslices of the input;
+// callers must not modify the input slice or the Line values within it after
+// calling Pairs.
+func Pairs(lines []Line) []LinePair {
+	var result []LinePair
+
+	i := 0
+	for i < len(lines) {
+		kind := lines[i].Kind
+		if kind != KindRemoved && kind != KindAdded {
+			i++
+			continue
+		}
+
+		// Collect contiguous removed block.
+		start := i
+		for i < len(lines) && lines[i].Kind == KindRemoved {
+			i++
+		}
+
+		removed := lines[start:i]
+		if len(removed) == 0 {
+			removed = nil
+		}
+
+		// Collect immediately following added block.
+		start = i
+		for i < len(lines) && lines[i].Kind == KindAdded {
+			i++
+		}
+
+		added := lines[start:i]
+		if len(added) == 0 {
+			added = nil
+		}
+
+		result = append(result, LinePair{Removed: removed, Added: added})
+	}
+
+	return result
+}
+
 // pair is a pair of line indexes, one for each side of the diff.
 type pair struct{ x, y int }
 
@@ -279,6 +341,57 @@ func trimPrefixSuffix(x, y [][]byte) trimResult {
 	}
 }
 
+// compact post-processes grouped diff lines, shifting change blocks to semantic
+// boundaries. For each contiguous block of KindRemoved (or KindAdded) lines, if
+// the last line in the block has the same content as the KindContext line
+// immediately following it, the block shifts down by one: the first line of the
+// block is re-classified as KindContext and the formerly-context line is
+// re-classified as the changed kind. This repeats until stable.
+//
+// compact never moves changes across hunk boundaries (KindHeader lines act as
+// natural stops since the inner loop only shifts when the next line is KindContext).
+func compact(lines []Line) []Line {
+	result := make([]Line, len(lines))
+	copy(result, lines)
+
+	for {
+		shifted := false
+
+		i := 0
+		for i < len(result) {
+			kind := result[i].Kind
+			if kind != KindRemoved && kind != KindAdded {
+				i++
+				continue
+			}
+			// Find end of contiguous block of this kind.
+			j := i + 1
+			for j < len(result) && result[j].Kind == kind {
+				j++
+			}
+			// j is the index of the first line after the block.
+			// Shift down when last line in block == first context line after it.
+			if j < len(result) && result[j].Kind == KindContext &&
+				bytes.Equal(result[j-1].Content, result[j].Content) {
+				result[i].Kind = KindContext
+				result[j].Kind = kind
+				shifted = true
+				i++ // advance past the newly-Context line; the freshly-reclassified j will be found on next scan
+
+				continue
+			}
+
+			i = j
+		}
+
+		if !shifted {
+			break
+		}
+	}
+
+	return result
+}
+
 // computeLines computes structured diff lines for old and newText (assumed non-equal).
 func computeLines(oldName string, old []byte, newName string, newText []byte, cfg config) []Line {
 	x := splitLines(old)
@@ -298,20 +411,24 @@ func computeLines(oldName string, old []byte, newName string, newText []byte, cf
 
 	if isDisjoint(tr.oldTrimmed, tr.newTrimmed) {
 		// Fast-path: no common lines — emit one hunk with all removals then all additions.
-		result := make([]Line, 0, diffHeaders+1+len(tr.oldTrimmed)+len(tr.newTrimmed))
-		result = append(result, headers...)
+		body := make([]Line, 0, 1+len(tr.oldTrimmed)+len(tr.newTrimmed))
 
-		result = append(result, chunkHeader(
+		body = append(body, chunkHeader(
 			pair{tr.prefix, tr.prefix},
 			pair{len(tr.oldTrimmed), len(tr.newTrimmed)},
 		))
 		for _, s := range tr.oldTrimmed {
-			result = append(result, Line{Kind: KindRemoved, Content: s})
+			body = append(body, Line{Kind: KindRemoved, Content: s})
 		}
 
 		for _, s := range tr.newTrimmed {
-			result = append(result, Line{Kind: KindAdded, Content: s})
+			body = append(body, Line{Kind: KindAdded, Content: s})
 		}
+
+		body = compact(body)
+		result := make([]Line, 0, diffHeaders+len(body))
+		result = append(result, headers...)
+		result = append(result, body...)
 
 		return result
 	}
@@ -326,6 +443,7 @@ func computeLines(oldName string, old []byte, newName string, newText []byte, cf
 	}
 
 	hunks := groupIntoHunks(pairs, x, y, cfg.contextLines)
+	hunks = compact(hunks)
 	result := make([]Line, 0, diffHeaders+len(hunks))
 	result = append(result, headers...)
 	result = append(result, hunks...)

@@ -70,6 +70,50 @@ func TestLines(t *testing.T) {
 				{Kind: diff.KindRemoved, Content: []byte("old line\n")},
 			},
 		},
+		{
+			name:    "compact shifts duplicate removal to second occurrence",
+			oldName: "want", newName: "got",
+			old:     []byte("a\na\nb\n"),
+			newText: []byte("a\nb\n"),
+			want: []diff.Line{
+				{Kind: diff.KindHeader, Content: []byte("diff want got\n")},
+				{Kind: diff.KindHeader, Content: []byte("--- want\n")},
+				{Kind: diff.KindHeader, Content: []byte("+++ got\n")},
+				{Kind: diff.KindHeader, Content: []byte("@@ -1,3 +1,2 @@\n")},
+				{Kind: diff.KindContext, Content: []byte("a\n")},
+				{Kind: diff.KindRemoved, Content: []byte("a\n")},
+				{Kind: diff.KindContext, Content: []byte("b\n")},
+			},
+		},
+		{
+			name:    "compact shifts duplicate addition to second occurrence",
+			oldName: "want", newName: "got",
+			old:     []byte("a\nb\n"),
+			newText: []byte("a\na\nb\n"),
+			want: []diff.Line{
+				{Kind: diff.KindHeader, Content: []byte("diff want got\n")},
+				{Kind: diff.KindHeader, Content: []byte("--- want\n")},
+				{Kind: diff.KindHeader, Content: []byte("+++ got\n")},
+				{Kind: diff.KindHeader, Content: []byte("@@ -1,2 +1,3 @@\n")},
+				{Kind: diff.KindContext, Content: []byte("a\n")},
+				{Kind: diff.KindAdded, Content: []byte("a\n")},
+				{Kind: diff.KindContext, Content: []byte("b\n")},
+			},
+		},
+		{
+			name:    "compact does not shift block at end of hunk with no following context",
+			oldName: "want", newName: "got",
+			old:     []byte("a\nb\n"),
+			newText: []byte("a\n"),
+			want: []diff.Line{
+				{Kind: diff.KindHeader, Content: []byte("diff want got\n")},
+				{Kind: diff.KindHeader, Content: []byte("--- want\n")},
+				{Kind: diff.KindHeader, Content: []byte("+++ got\n")},
+				{Kind: diff.KindHeader, Content: []byte("@@ -1,2 +1,1 @@\n")},
+				{Kind: diff.KindContext, Content: []byte("a\n")},
+				{Kind: diff.KindRemoved, Content: []byte("b\n")},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -429,6 +473,170 @@ func TestDisjointFastPath(t *testing.T) {
 
 	if added != 512 {
 		t.Errorf("added line count = %d, want 512", added)
+	}
+}
+
+// TestPairs verifies that Pairs groups consecutive removed/added blocks correctly.
+func TestPairs(t *testing.T) {
+	tests := []struct {
+		name  string
+		lines []diff.Line
+		want  []diff.LinePair
+	}{
+		{
+			name:  "nil input returns nil",
+			lines: nil,
+			want:  nil,
+		},
+		{
+			name: "only context lines returns nil",
+			lines: []diff.Line{
+				{Kind: diff.KindContext, Content: []byte("unchanged\n")},
+			},
+			want: nil,
+		},
+		{
+			name: "removed followed by added forms one pair",
+			lines: []diff.Line{
+				{Kind: diff.KindContext, Content: []byte("ctx\n")},
+				{Kind: diff.KindRemoved, Content: []byte("old\n")},
+				{Kind: diff.KindAdded, Content: []byte("new\n")},
+				{Kind: diff.KindContext, Content: []byte("ctx2\n")},
+			},
+			want: []diff.LinePair{
+				{
+					Removed: []diff.Line{{Kind: diff.KindRemoved, Content: []byte("old\n")}},
+					Added:   []diff.Line{{Kind: diff.KindAdded, Content: []byte("new\n")}},
+				},
+			},
+		},
+		{
+			name: "removed-only block has nil Added",
+			lines: []diff.Line{
+				{Kind: diff.KindRemoved, Content: []byte("gone\n")},
+				{Kind: diff.KindContext, Content: []byte("ctx\n")},
+			},
+			want: []diff.LinePair{
+				{
+					Removed: []diff.Line{{Kind: diff.KindRemoved, Content: []byte("gone\n")}},
+					Added:   nil,
+				},
+			},
+		},
+		{
+			name: "added-only block has nil Removed",
+			lines: []diff.Line{
+				{Kind: diff.KindContext, Content: []byte("ctx\n")},
+				{Kind: diff.KindAdded, Content: []byte("new\n")},
+			},
+			want: []diff.LinePair{
+				{
+					Removed: nil,
+					Added:   []diff.Line{{Kind: diff.KindAdded, Content: []byte("new\n")}},
+				},
+			},
+		},
+		{
+			name: "two separate change blocks produce two pairs",
+			lines: []diff.Line{
+				{Kind: diff.KindRemoved, Content: []byte("a\n")},
+				{Kind: diff.KindAdded, Content: []byte("b\n")},
+				{Kind: diff.KindContext, Content: []byte("ctx\n")},
+				{Kind: diff.KindRemoved, Content: []byte("c\n")},
+				{Kind: diff.KindAdded, Content: []byte("d\n")},
+			},
+			want: []diff.LinePair{
+				{
+					Removed: []diff.Line{{Kind: diff.KindRemoved, Content: []byte("a\n")}},
+					Added:   []diff.Line{{Kind: diff.KindAdded, Content: []byte("b\n")}},
+				},
+				{
+					Removed: []diff.Line{{Kind: diff.KindRemoved, Content: []byte("c\n")}},
+					Added:   []diff.Line{{Kind: diff.KindAdded, Content: []byte("d\n")}},
+				},
+			},
+		},
+		{
+			name: "header lines are skipped",
+			lines: []diff.Line{
+				{Kind: diff.KindHeader, Content: []byte("@@ -1,1 +1,1 @@\n")},
+				{Kind: diff.KindRemoved, Content: []byte("x\n")},
+				{Kind: diff.KindAdded, Content: []byte("y\n")},
+			},
+			want: []diff.LinePair{
+				{
+					Removed: []diff.Line{{Kind: diff.KindRemoved, Content: []byte("x\n")}},
+					Added:   []diff.Line{{Kind: diff.KindAdded, Content: []byte("y\n")}},
+				},
+			},
+		},
+		{
+			name: "added block before removed block produces two pairs",
+			lines: []diff.Line{
+				{Kind: diff.KindAdded, Content: []byte("new\n")},
+				{Kind: diff.KindContext, Content: []byte("ctx\n")},
+				{Kind: diff.KindRemoved, Content: []byte("old\n")},
+			},
+			want: []diff.LinePair{
+				{
+					Removed: nil,
+					Added:   []diff.Line{{Kind: diff.KindAdded, Content: []byte("new\n")}},
+				},
+				{
+					Removed: []diff.Line{{Kind: diff.KindRemoved, Content: []byte("old\n")}},
+					Added:   nil,
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := diff.Pairs(tt.lines)
+			if len(got) != len(tt.want) {
+				t.Fatalf("Pairs() returned %d pairs, want %d\ngot:  %#v\nwant: %#v",
+					len(got), len(tt.want), got, tt.want)
+			}
+
+			for i, p := range got {
+				assertLinePair(t, i, p, tt.want[i])
+			}
+		})
+	}
+}
+
+// assertLinePair verifies that a single LinePair matches the expected pair.
+func assertLinePair(t *testing.T, i int, got, want diff.LinePair) {
+	t.Helper()
+
+	if len(got.Removed) != len(want.Removed) {
+		t.Errorf("pair[%d].Removed len = %d, want %d", i, len(got.Removed), len(want.Removed))
+		return
+	}
+
+	if len(got.Added) != len(want.Added) {
+		t.Errorf("pair[%d].Added len = %d, want %d", i, len(got.Added), len(want.Added))
+		return
+	}
+
+	for j, line := range got.Removed {
+		if line.Kind != want.Removed[j].Kind {
+			t.Errorf("pair[%d].Removed[%d].Kind = %v, want %v", i, j, line.Kind, want.Removed[j].Kind)
+		}
+
+		if !bytes.Equal(line.Content, want.Removed[j].Content) {
+			t.Errorf("pair[%d].Removed[%d].Content = %q, want %q", i, j, line.Content, want.Removed[j].Content)
+		}
+	}
+
+	for j, line := range got.Added {
+		if line.Kind != want.Added[j].Kind {
+			t.Errorf("pair[%d].Added[%d].Kind = %v, want %v", i, j, line.Kind, want.Added[j].Kind)
+		}
+
+		if !bytes.Equal(line.Content, want.Added[j].Content) {
+			t.Errorf("pair[%d].Added[%d].Content = %q, want %q", i, j, line.Content, want.Added[j].Content)
+		}
 	}
 }
 

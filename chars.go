@@ -2,6 +2,7 @@ package diff
 
 import (
 	"bytes"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -123,6 +124,252 @@ func CharDiff(removed, added []byte, opts ...Option) InlineChange {
 	addedSegs := reattachNL(segs.added, addedNL)
 
 	return InlineChange{Removed: removedSegs, Added: addedSegs}
+}
+
+// tokenize splits b into word and delimiter tokens.
+// Words are maximal runs of Unicode letters, digits, and underscores.
+// Every other rune is an individual delimiter token.
+// Tokens are subslices of b — no allocation beyond the slice header list.
+func tokenize(b []byte) [][]byte {
+	var tokens [][]byte
+
+	i := 0
+	for i < len(b) {
+		r, sz := utf8.DecodeRune(b[i:])
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
+			start := i
+			for i < len(b) {
+				r, sz = utf8.DecodeRune(b[i:])
+				if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
+					break
+				}
+
+				i += sz
+			}
+
+			tokens = append(tokens, b[start:i])
+		} else {
+			tokens = append(tokens, b[i:i+sz])
+			i += sz
+		}
+	}
+
+	return tokens
+}
+
+// tokenOp is a single edit operation produced during word-token LCS backtracking.
+type tokenOp struct {
+	tok  []byte
+	kind byte // 'e' equal, 'd' delete, 'i' insert
+}
+
+// wordLCSSegments builds the LCS table for token slices and returns Segment-based sides.
+// It is the word-token analogue of lcsSegments: tokens replace runes, bytes.Equal
+// replaces rune equality, and each token's bytes are appended to the backing buffers.
+// rCap and aCap must equal the byte lengths of the removed and added core inputs so
+// the backing buffers never reallocate.
+func wordLCSSegments(old, newToks [][]byte, rCap, aCap int) sides {
+	m, n := len(old), len(newToks)
+
+	dp := make([]int, (m+1)*(n+1))
+
+	stride := n + 1
+	for i := 1; i <= m; i++ {
+		for j := 1; j <= n; j++ {
+			if bytes.Equal(old[i-1], newToks[j-1]) {
+				dp[i*stride+j] = dp[(i-1)*stride+(j-1)] + 1
+			} else {
+				dp[i*stride+j] = max(dp[(i-1)*stride+j], dp[i*stride+(j-1)])
+			}
+		}
+	}
+
+	ops := make([]tokenOp, 0, m+n)
+
+	i, j := m, n
+	for i > 0 || j > 0 {
+		switch {
+		case i > 0 && j > 0 && bytes.Equal(old[i-1], newToks[j-1]):
+			ops = append(ops, tokenOp{tok: old[i-1], kind: 'e'})
+			i--
+			j--
+		case j > 0 && (i == 0 || dp[i*stride+(j-1)] >= dp[(i-1)*stride+j]):
+			ops = append(ops, tokenOp{tok: newToks[j-1], kind: 'i'})
+			j--
+		default:
+			ops = append(ops, tokenOp{tok: old[i-1], kind: 'd'})
+			i--
+		}
+	}
+
+	for l, r := 0, len(ops)-1; l < r; l, r = l+1, r-1 {
+		ops[l], ops[r] = ops[r], ops[l]
+	}
+
+	return mergeTokenSegments(ops, rCap, aCap)
+}
+
+// mergeTokenSegments merges consecutive same-kind token ops into Segment runs.
+// rCap and aCap are the byte capacities for the removed and added backing buffers;
+// they must equal the byte lengths of the respective core inputs so the buffers
+// never reallocate, keeping all segment Text subslices valid.
+func mergeTokenSegments(ops []tokenOp, rCap, aCap int) sides {
+	removedBacking := make([]byte, 0, rCap)
+	addedBacking := make([]byte, 0, aCap)
+	removedSegs := make([]Segment, 0, segmentInitCap)
+	addedSegs := make([]Segment, 0, segmentInitCap)
+
+	for _, o := range ops {
+		nb := len(o.tok)
+
+		switch o.kind {
+		case 'e':
+			removedBacking = append(removedBacking, o.tok...)
+
+			if len(removedSegs) > 0 && !removedSegs[len(removedSegs)-1].Changed {
+				last := &removedSegs[len(removedSegs)-1]
+				last.Text = last.Text[:len(last.Text)+nb]
+			} else {
+				removedSegs = append(
+					removedSegs,
+					Segment{Text: removedBacking[len(removedBacking)-nb:], Changed: false},
+				)
+			}
+
+			addedBacking = append(addedBacking, o.tok...)
+
+			if len(addedSegs) > 0 && !addedSegs[len(addedSegs)-1].Changed {
+				last := &addedSegs[len(addedSegs)-1]
+				last.Text = last.Text[:len(last.Text)+nb]
+			} else {
+				addedSegs = append(addedSegs, Segment{Text: addedBacking[len(addedBacking)-nb:], Changed: false})
+			}
+
+		case 'd':
+			removedBacking = append(removedBacking, o.tok...)
+
+			if len(removedSegs) > 0 && removedSegs[len(removedSegs)-1].Changed {
+				last := &removedSegs[len(removedSegs)-1]
+				last.Text = last.Text[:len(last.Text)+nb]
+			} else {
+				removedSegs = append(removedSegs, Segment{Text: removedBacking[len(removedBacking)-nb:], Changed: true})
+			}
+
+		case 'i':
+			addedBacking = append(addedBacking, o.tok...)
+
+			if len(addedSegs) > 0 && addedSegs[len(addedSegs)-1].Changed {
+				last := &addedSegs[len(addedSegs)-1]
+				last.Text = last.Text[:len(last.Text)+nb]
+			} else {
+				addedSegs = append(addedSegs, Segment{Text: addedBacking[len(addedBacking)-nb:], Changed: true})
+			}
+
+		default:
+			// op.kind is always 'e', 'd', or 'i' — wordLCSSegments is the only producer.
+		}
+	}
+
+	if len(removedSegs) == 0 {
+		removedSegs = append(removedSegs, Segment{Text: []byte{}, Changed: false})
+	}
+
+	if len(addedSegs) == 0 {
+		addedSegs = append(addedSegs, Segment{Text: []byte{}, Changed: false})
+	}
+
+	return sides{removed: removedSegs, added: addedSegs}
+}
+
+// WordDiff computes word-level diff segments for a removed/added line pair.
+// It tokenises each line into words (maximal runs of Unicode letters, digits,
+// and underscores) and delimiters (all other runes, individually), then runs
+// an LCS on the token slices. Changed segments cover whole words or delimiter
+// sequences, producing wider, cleaner highlights than [CharDiff] for prose or
+// code identifiers.
+//
+// The same guards as [CharDiff] apply:
+//   - Identical inputs return all-unchanged segments.
+//   - Trailing newlines are stripped before diffing and reattached afterwards;
+//     a trailing newline is never placed inside a Changed segment.
+//   - Invalid UTF-8 returns a whole-line Changed segment.
+//   - Either side exceeding 500 tokens returns a whole-line Changed segment.
+//   - If the similarity ratio (2*equalBytes / totalBytes) is below the threshold
+//     set by [WithSimilarityThreshold] (default 0.5), a whole-line Changed
+//     segment is returned.
+//
+// The concatenation of segment Text fields on each side always equals the
+// original input byte-for-byte.
+func WordDiff(removed, added []byte, opts ...Option) InlineChange {
+	cfg := applyOptions(opts)
+
+	if bytes.Equal(removed, added) {
+		return InlineChange{
+			Removed: []Segment{{Text: bytes.Clone(removed), Changed: false}},
+			Added:   []Segment{{Text: bytes.Clone(added), Changed: false}},
+		}
+	}
+
+	removedNL := len(removed) > 0 && removed[len(removed)-1] == '\n'
+	addedNL := len(added) > 0 && added[len(added)-1] == '\n'
+
+	removedCore := removed
+	if removedNL {
+		removedCore = removed[:len(removed)-1]
+	}
+
+	addedCore := added
+	if addedNL {
+		addedCore = added[:len(added)-1]
+	}
+
+	if !utf8.Valid(removedCore) || !utf8.Valid(addedCore) {
+		return fallback(removed, added)
+	}
+
+	oldToks := tokenize(removedCore)
+	newToks := tokenize(addedCore)
+
+	if len(oldToks) > 500 || len(newToks) > 500 {
+		return fallback(removed, added)
+	}
+
+	segs := wordLCSSegments(oldToks, newToks, len(removedCore), len(addedCore))
+
+	// Similarity ratio gate using byte counts for consistency with CharDiff.
+	totalBytes := len(removedCore) + len(addedCore)
+	if totalBytes > 0 {
+		equalBytes := 0
+
+		for _, seg := range segs.removed {
+			if !seg.Changed {
+				equalBytes += len(seg.Text)
+			}
+		}
+
+		ratio := float64(similarityRatioScale*equalBytes) / float64(totalBytes)
+		if ratio < cfg.similarityThreshold {
+			var rSegs []Segment
+			if len(removedCore) > 0 {
+				rSegs = []Segment{{Text: bytes.Clone(removedCore), Changed: true}}
+			}
+
+			var aSegs []Segment
+			if len(addedCore) > 0 {
+				aSegs = []Segment{{Text: bytes.Clone(addedCore), Changed: true}}
+			}
+
+			return InlineChange{
+				Removed: reattachNL(rSegs, removedNL),
+				Added:   reattachNL(aSegs, addedNL),
+			}
+		}
+	}
+
+	return InlineChange{
+		Removed: reattachNL(segs.removed, removedNL),
+		Added:   reattachNL(segs.added, addedNL),
+	}
 }
 
 // fallback returns a single Changed segment per side (whole-line fallback).
