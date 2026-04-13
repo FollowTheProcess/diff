@@ -153,25 +153,25 @@ func TestLines(t *testing.T) {
 // TestEqual verifies Equal returns true when old and new are identical.
 func TestEqual(t *testing.T) {
 	tests := []struct {
-		name string
-		old  []byte
-		new  []byte
+		name    string
+		old     []byte
+		newText []byte
 	}{
 		{
-			name: "identical byte slices",
-			old:  []byte("same\n"),
-			new:  []byte("same\n"),
+			name:    "identical byte slices",
+			old:     []byte("same\n"),
+			newText: []byte("same\n"),
 		},
 		{
-			name: "both empty",
-			old:  []byte(""),
-			new:  []byte(""),
+			name:    "both empty",
+			old:     []byte(""),
+			newText: []byte(""),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := diff.New("a", tt.old, "b", tt.new); !got.Equal() {
+			if got := diff.New("a", tt.old, "b", tt.newText); !got.Equal() {
 				t.Fatal("Equal() = false, want true for identical inputs")
 			}
 		})
@@ -185,32 +185,32 @@ func TestString(t *testing.T) {
 		name        string
 		wantContain string
 		old         []byte
-		new         []byte
+		newText     []byte
 		wantEmpty   bool
 	}{
 		{
 			name:      "equal inputs produce empty string",
 			old:       []byte("same\n"),
-			new:       []byte("same\n"),
+			newText:   []byte("same\n"),
 			wantEmpty: true,
 		},
 		{
 			name:      "both empty inputs produce empty string",
 			old:       []byte(""),
-			new:       []byte(""),
+			newText:   []byte(""),
 			wantEmpty: true,
 		},
 		{
 			name:        "differing inputs produce non-empty unified diff",
 			old:         []byte("hello\nworld\n"),
-			new:         []byte("hello\nearth\n"),
+			newText:     []byte("hello\nearth\n"),
 			wantContain: "- world",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := diff.New("a", tt.old, "b", tt.new).String()
+			got := diff.New("a", tt.old, "b", tt.newText).String()
 			if tt.wantEmpty {
 				if got != "" {
 					t.Fatalf("String() = %q, want empty string for equal inputs", got)
@@ -267,7 +267,7 @@ func Test(t *testing.T) {
 	}
 }
 
-// FuzzLines verifies Lines never panics and returns nil iff inputs are equal.
+// FuzzLines verifies Lines and String never panic and return nil/empty iff inputs are equal.
 func FuzzLines(f *testing.F) {
 	f.Add([]byte(""), []byte(""))
 	f.Add([]byte("same\n"), []byte("same\n"))
@@ -279,6 +279,8 @@ func FuzzLines(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, old, newContent []byte) {
 		d := diff.New("a", old, "b", newContent)
+
+		_ = d.String() // must not panic
 		if bytes.Equal(old, newContent) {
 			if !d.Equal() {
 				t.Fatal("Equal() = false for equal inputs")

@@ -15,7 +15,7 @@ package diff // import "go.followtheprocess.codes/diff"
 import (
 	"bytes"
 	"fmt"
-	"sort"
+	"slices"
 	"unsafe"
 )
 
@@ -61,6 +61,10 @@ type Line struct {
 const (
 	// defaultContextLines is the default number of unchanged context lines shown around each change.
 	defaultContextLines = 3
+
+	// avgBytesPerLine is a rough estimate of bytes per output line used to
+	// pre-allocate the String buffer and avoid repeated growth on typical diffs.
+	avgBytesPerLine = 40
 )
 
 // config holds resolved options for a diff operation.
@@ -130,6 +134,7 @@ func (d Diff) String() string {
 	}
 
 	var out bytes.Buffer
+	out.Grow(len(d.lines) * avgBytesPerLine)
 
 	for _, line := range d.lines {
 		switch line.Kind {
@@ -157,8 +162,9 @@ type pair struct{ x, y int }
 
 // groupIntoHunks groups the unique-line match pairs returned by [tgs] into
 // context-annotated diff Lines.
-// pairs is the output of [tgs] (including sentinels). x and y are the full line
-// slices. contextLines controls how many unchanged lines are shown around changes.
+// pairs is the output of [tgs] with coordinates offset into full-array space
+// (including sentinels). x and y are the full line slices. contextLines controls
+// how many unchanged lines are shown around changes.
 func groupIntoHunks(pairs []pair, x, y [][]byte, contextLines int) []Line {
 	var (
 		done   pair
@@ -245,11 +251,16 @@ type trimResult struct {
 	suffix     int
 }
 
+// isDisjointThreshold is the minimum slice length on each side required for
+// [isDisjoint] to run the O(n) set-intersection check. Below this size the TGS
+// algorithm is fast enough that the overhead of building a hash set is not worthwhile.
+const isDisjointThreshold = 512
+
 // isDisjoint reports whether old and new share no lines in common.
-// It only performs the check when both slices have at least 512 lines;
+// It only performs the check when both slices have at least [isDisjointThreshold] lines;
 // below that threshold [tgs] is fast enough that the overhead is not worthwhile.
 func isDisjoint(old, newSlice [][]byte) bool {
-	if len(old) < 512 || len(newSlice) < 512 {
+	if len(old) < isDisjointThreshold || len(newSlice) < isDisjointThreshold {
 		return false
 	}
 
@@ -536,9 +547,7 @@ func tgs(x, y [][]byte) []pair {
 	}
 
 	for i := range n {
-		k := sort.Search(n, func(k int) bool {
-			return tails[k] >= j[i]
-		})
+		k, _ := slices.BinarySearch(tails[:n], j[i])
 		tails[k] = j[i]
 		lengths[i] = k + 1
 	}
