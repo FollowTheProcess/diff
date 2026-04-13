@@ -43,6 +43,8 @@ type Option func(*config)
 // WithSimilarityThreshold sets the minimum similarity ratio for intraline highlighting.
 // ratio = 2*equalRunes / (len(removedRunes) + len(addedRunes)).
 // Default is 0.5. Use 0.0 to always highlight; 1.0 to never highlight.
+// Values outside [0.0, 1.0] are accepted: negative values force inline highlighting
+// on all pairs; values above 1.0 suppress it entirely.
 func WithSimilarityThreshold(t float64) Option {
 	return func(c *config) { c.similarityThreshold = t }
 }

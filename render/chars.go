@@ -129,15 +129,11 @@ func fallback(removed, added []byte) inlineChange {
 	result := inlineChange{}
 
 	if len(removed) > 0 {
-		cp := make([]byte, len(removed))
-		copy(cp, removed)
-		result.removed = []segment{{text: cp, changed: true}}
+		result.removed = []segment{{text: bytes.Clone(removed), changed: true}}
 	}
 
 	if len(added) > 0 {
-		cp := make([]byte, len(added))
-		copy(cp, added)
-		result.added = []segment{{text: cp, changed: true}}
+		result.added = []segment{{text: bytes.Clone(added), changed: true}}
 	}
 
 	return result
